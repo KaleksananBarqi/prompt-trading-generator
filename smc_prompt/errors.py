@@ -2,6 +2,11 @@
 
 Exit codes map 1:1 to exception types (see ``docs/DESIGN_SPEC.md`` §9).
 
+The output ``.md`` file is the primary artifact, so only a failure to write it
+raises :class:`OutputError` (exit 6). Clipboard access failures raise
+:class:`ClipboardUnavailable`, which is caught internally and downgraded to a
+non-fatal warning (exit stays 0).
+
     SmcPromptError            base, exit 1
     ├── ConfigError           exit 2
     ├── SymbolNotFoundError   exit 3
@@ -50,15 +55,16 @@ class InsufficientDataError(SmcPromptError):
 
 
 class OutputError(SmcPromptError):
-    """Neither clipboard nor fallback file could be produced (exit 6)."""
+    """The output ``.md`` file could not be written (exit 6)."""
 
     exit_code = 6
 
 
 class ClipboardUnavailable(SmcPromptError):
-    """Internal signal: clipboard access failed; triggers the file fallback.
+    """Internal signal: the best-effort clipboard copy failed.
 
-    Never propagated to the user as a fatal error on its own.
+    The output file has already been written at this point, so this is
+    downgraded to a non-fatal warning and never propagated as a fatal error.
     """
 
     exit_code = 6
@@ -75,6 +81,27 @@ class DelistedWarning:
         return (
             f"Latest {self.count} candles have zero volume; {self.symbol} "
             f"may be delisted or halted. Prompt generated with caution."
+        )
+
+
+@dataclass(frozen=True)
+class SymbolStatusWarning:
+    """Non-fatal warning: the symbol is listed but its status is not TRADING.
+
+    A halted / BREAK / non-TRADING symbol can still have usable historical
+    candles, so this is surfaced to the user (stderr) rather than rendering the
+    pair as if it were cleanly tradable. Reuses the :class:`DelistedWarning`
+    non-fatal payload pattern.
+    """
+
+    symbol: str
+    status: str
+
+    def message(self) -> str:
+        return (
+            f"Symbol {self.symbol} has exchange status '{self.status}' "
+            f"(not TRADING); candles may be stale or the market halted. "
+            f"Prompt generated with caution."
         )
 
 

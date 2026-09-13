@@ -3,7 +3,8 @@
 Endpoints (no API key, no signed/private routes, spec §4.1):
   * ``GET /api/v3/klines``        — HTF daily / LTF hourly OHLCV
   * ``GET /api/v3/ticker/price``  — current price
-  * ``GET /api/v3/exchangeInfo``  — symbol validation
+  * ``GET /api/v3/exchangeInfo``  — symbol validation (+ tickSize, status)
+  * ``GET /api/v3/time``          — server time (clock-skew-safe closure)
 
 Includes retry-with-backoff (spec §9.4) and base-URL failover on connection
 errors / HTTP 451 / HTTP 403.
@@ -39,6 +40,51 @@ def _ms_to_utc(ms: int | float | str) -> datetime:
     return datetime.fromtimestamp(int(ms) / 1000.0, tz=timezone.utc)
 
 
+def price_within_band(
+    price: Decimal,
+    reference_candle: Candle | None,
+    tolerance: Decimal | None,
+) -> bool:
+    """True when ``price`` lies within ``reference.low - tol .. reference.high + tol``.
+
+    A missing reference candle or tolerance degrades to "always plausible"
+    (no basis for a cross-check), keeping the callers branch-free.
+    """
+
+    if reference_candle is None or tolerance is None:
+        return True
+    return (
+        reference_candle.low - tolerance
+        <= price
+        <= reference_candle.high + tolerance
+    )
+
+
+def price_sanity_warning(
+    price: Decimal,
+    reference_candle: Candle | None,
+    tolerance: Decimal | None,
+    *,
+    symbol: str,
+) -> str | None:
+    """Non-fatal warning when ``price`` is outside the last-candle band ± ATR.
+
+    Returns ``None`` when the price is plausible (or cannot be cross-checked).
+    The message is deterministic; it is emitted on stderr by the CLI and never
+    alters the rendered prompt.
+    """
+
+    if price_within_band(price, reference_candle, tolerance):
+        return None
+    band = tolerance if tolerance is not None else Decimal("0")
+    return (
+        f"Current price {cfg.fmt_price(price)} is outside the last closed "
+        f"candle range [{cfg.fmt_price(reference_candle.low)}, "
+        f"{cfg.fmt_price(reference_candle.high)}] ± {cfg.fmt_price(band)}; "
+        f"possible stale {symbol} ticker data. Prompt generated with caution."
+    )
+
+
 class DataFetcher:
     """Fetches and normalizes Binance market data for one symbol."""
 
@@ -55,8 +101,35 @@ class DataFetcher:
         self._session = session or requests.Session()
         self._sleep = sleep
         self._rand = rand
+        #: ``now`` reference for the half-open-candle decision. The caller
+        #: injects the Binance server time here (host-clock fallback) so a
+        #: skewed local clock cannot leak a half-formed candle into analysis.
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._active_base_url: str | None = None
+        self._price_notes: list[str] = []
+
+    @property
+    def price_notes(self) -> tuple[str, ...]:
+        """Non-fatal notes recorded by the last :meth:`fetch_current_price`."""
+
+        return tuple(self._price_notes)
+
+    def with_now(self, moment: datetime) -> "DataFetcher":
+        """Return an equivalent fetcher bound to a fixed ``now`` instant.
+
+        Rebuilds the fetcher with the same injectable seams (``session`` /
+        ``sleep`` / ``rand``) and the supplied ``now`` so the caller can rebind
+        the half-open-candle reference to the Binance server time without
+        reaching into private state. Network behaviour is otherwise identical.
+        """
+
+        return DataFetcher(
+            self._config,
+            session=self._session,
+            sleep=self._sleep,
+            rand=self._rand,
+            now=lambda: moment,
+        )
 
     # ------------------------------------------------------------------
     # Internals
@@ -154,8 +227,31 @@ class DataFetcher:
 
         return self._active_base_url
 
+    def fetch_server_time(self) -> datetime:
+        """Fetch the Binance server time (``GET /api/v3/time``).
+
+        Using the exchange clock as the ``now`` reference keeps the half-open
+        candle decision (and ``GENERATED_AT_UTC``) immune to a skewed host
+        clock. Raises :class:`NetworkError` when the endpoint is unavailable or
+        its payload is malformed; the caller falls back to the host clock.
+        """
+
+        payload = self._request_json(cfg.TIME_PATH, {})
+        try:
+            server_ms = payload["serverTime"]
+        except (KeyError, TypeError) as exc:
+            raise NetworkError(
+                f"server time endpoint returned no serverTime field ({exc})."
+            ) from exc
+        return _ms_to_utc(server_ms)
+
     def validate_symbol(self) -> dict[str, Any]:
-        """Validate the symbol against ``exchangeInfo`` (spec §9.3)."""
+        """Validate the symbol against ``exchangeInfo`` (spec §9.3).
+
+        Returns the raw ``exchangeInfo`` entry so the caller can derive
+        ``PRICE_FILTER.tickSize`` precision and surface a non-TRADING
+        ``status`` warning (the entry is *not* discarded).
+        """
 
         payload = self._request_json(
             cfg.EXCHANGE_INFO_PATH, {"symbol": self._config.symbol}
@@ -166,12 +262,7 @@ class DataFetcher:
                 f"Symbol '{self._config.symbol}' is not listed on Binance "
                 f"Spot. Check the spelling (e.g. BTCUSDT)."
             )
-        entry = symbols[0]
-        if entry.get("status") not in (None, "TRADING"):
-            # A listed but non-trading symbol is still surfaced to the user;
-            # the zero-volume heuristic in the analyzer reports it as warning.
-            pass
-        return entry
+        return symbols[0]
 
     def fetch_klines(
         self, interval: str, limit: int, *, symbol: str | None = None
@@ -208,29 +299,78 @@ class DataFetcher:
             )
         return candles
 
-    def fetch_current_price(self) -> Decimal:
+    def _kline_fallback_price(self) -> Decimal:
+        """Last *closed* LTF candle close (spec §4.3 fallback source)."""
+
+        candles = self.fetch_klines(self._config.ltf_interval, cfg.MIN_CANDLES)
+        closed = [c for c in candles if c.is_closed]
+        if not closed:
+            raise NetworkError(
+                "Current price unavailable: ticker endpoint failed and no "
+                "closed candle exists to derive a fallback price."
+            )
+        fallback = closed[-1].close
+        if fallback <= 0:
+            raise NetworkError(
+                f"Fallback kline close is non-positive ({fallback}); "
+                f"cannot determine a valid current price."
+            )
+        return fallback
+
+    def fetch_current_price(
+        self,
+        *,
+        reference_candle: Candle | None = None,
+        tolerance: Decimal | None = None,
+    ) -> Decimal:
         """Fetch the current price via ticker/price, falling back to kline close.
 
-        Uses the last *closed* 1h candle close as fallback; the half-open
+        Uses the last *closed* LTF candle close as fallback; the half-open
         candle is never used for anything else (spec §4.3).
+
+        Sanity checks (§ robustness cluster):
+
+        * ``price > 0`` — a non-positive ticker value is rejected.
+        * plausibility cross-check — when ``reference_candle`` (the last closed
+          LTF candle) and ``tolerance`` (``1 × ATR(14)``) are supplied, a ticker
+          price outside the candle's ``[low, high]`` band ± tolerance is
+          rejected as implausible.
+
+        A rejected ticker is downgraded to the closed-candle fallback and the
+        reason is recorded in :attr:`price_notes` (the CLI emits it as a
+        non-fatal WARN). A :class:`NetworkError` is raised only when *no* valid
+        price can be determined at all.
         """
 
+        self._price_notes = []
+        ticker_error: str | None = None
         try:
             payload = self._request_json(
                 cfg.TICKER_PRICE_PATH, {"symbol": self._config.symbol}
             )
-            price = payload.get("price") if isinstance(payload, dict) else None
-            if price is None:
+            raw_price = payload.get("price") if isinstance(payload, dict) else None
+            if raw_price is None:
                 raise NetworkError("ticker/price returned no price field.")
-            return Decimal(str(price))
-        except (NetworkError, SymbolNotFoundError):
-            candles = self.fetch_klines(
-                self._config.ltf_interval, cfg.MIN_CANDLES
-            )
-            closed = [c for c in candles if c.is_closed]
-            if not closed:
+            value = Decimal(str(raw_price))
+            if value <= 0:
                 raise NetworkError(
-                    "Current price unavailable: ticker endpoint failed and no "
-                    "closed candle exists to derive a fallback price."
+                    f"ticker/price returned an invalid non-positive price "
+                    f"({value})."
                 )
-            return closed[-1].close
+            if not price_within_band(value, reference_candle, tolerance):
+                raise NetworkError(
+                    f"ticker/price {value} is outside the last closed candle "
+                    f"range ± ATR."
+                )
+            return value
+        except (NetworkError, SymbolNotFoundError) as exc:
+            ticker_error = str(exc)
+
+        fallback = self._kline_fallback_price()
+        if ticker_error is not None:
+            self._price_notes.append(
+                f"Ticker price rejected ({ticker_error}) Using last closed "
+                f"{self._config.ltf_interval} candle close "
+                f"{cfg.fmt_price(fallback)} instead."
+            )
+        return fallback

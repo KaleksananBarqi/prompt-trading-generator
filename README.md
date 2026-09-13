@@ -3,8 +3,9 @@
 `smc-prompt` adalah **CLI Python sekali-jalan (single-run)** yang mengambil data
 OHLC dari **Binance public REST API** (tanpa API key), menghitung **fakta
 struktural yang objektif dan mekanis** (lapisan `[FAKTA]`), menyuntikkan fakta
-tersebut ke dalam template prompt yang tetap, lalu **mencetak prompt akhir ke
-terminal** dan **menyalinnya ke clipboard**.
+tersebut ke dalam template prompt yang tetap, lalu **menulis prompt akhir ke
+berkas `.md` di `./output`**, **menyalinnya ke clipboard** (best-effort), dan
+opsional **mencetaknya ke terminal** lewat `--stdout`.
 
 Alat ini adalah **utilitas penyiapan data (data-preparation utility)** untuk LLM
 teks di hilir. Ia **tidak melakukan penalaran apa pun** sendiri; seluruh
@@ -20,20 +21,55 @@ didelegasikan sepenuhnya kepada LLM yang membaca prompt.
 
 - **Dua lapisan payload** yang disuntikkan ke prompt:
   - **Layer A — Computed Summary:** harga saat ini, swing high/low terdeteksi
-    (harga + timestamp), klasifikasi struktur mekanis, metrik jarak, dan
-    ATR(14) opsional.
-  - **Layer B — Raw Candle Table:** tabel OHLC ringkas format CSV (HTF daily dan
-    LTF hourly) agar LLM dapat menurunkan sendiri FVG, Order Block, dan
-    CHoCH/MSS (butuh 3 candle untuk FVG, beberapa swing untuk CHoCH/MSS).
+    (harga + timestamp), **sequence swing berlabel** (HH/HL/LH/LL/EQH/EQL),
+    klasifikasi struktur mekanis, **equal highs/lows (liquidity pool)**,
+    **Fair Value Gap (FVG) mekanis** (3-candle, lengkap dengan status
+    `filled`/`unfilled`), **tiga jenis referensi level** (recent / nearest /
+    window-extreme) lengkap dengan status `swept`/`untested`, metrik jarak, dan
+    ATR(14) opsional. Jarak swing juga disajikan **ternormalisasi ATR**
+    (`x{n}×ATR`), ATR(14) diringkas sebagai **persentase harga**
+    (`ATR ≈ x% of price`), dan candle terakhir diberi **sinyal volume mekanis**
+    (volume relatif `last/mean(N)` dan flag spike). Lihat Phase 5 di bawah.
+  - **Layer B — Raw Candle Table:** tabel OHLCV ringkas format CSV (HTF dan LTF;
+    default HTF daily `1d` dan LTF hourly `1h`, interval dapat dikonfigurasi)
+    agar LLM dapat menurunkan sendiri Order Block dan CHoCH/MSS (beberapa swing).
+    FVG kini dihitung di Layer A sebagai fakta mekanis murni (lihat di bawah).
 - **Deteksi swing deterministik:** N-bar Williams Fractal (default `N = 5`)
-  dengan post-filter pemisahan ATR. Tanpa random, tanpa rekursi, tanpa
-  lookahead.
-- **Klasifikasi struktur mekanis:** `Bullish` / `Bearish` / `Ranging/Mixed` —
-  murni perbandingan numerik swing terakhir, **bukan** "bias".
+  dengan post-filter pemisahan ATR dan **post-pass skeleton bergantian**
+  (`enforce_alternation`) yang menjamin urutan H/L/H/L murni. Tanpa random,
+  tanpa rekursi, tanpa lookahead.
+- **Klasifikasi struktur mekanis:** `Bullish` / `Bearish` / `Ranging/Mixed` /
+  `Equal Highs/Lows` — murni perbandingan numerik swing terakhir, **bukan**
+  "bias".
 - **Retry + backoff** dan **failover host** (connection error, HTTP 451
   geo-block, HTTP 403).
-- **Output ganda:** cetak ke `stdout` **dan** salin ke clipboard; jika clipboard
-  tidak tersedia (lingkungan headless), prompt ditulis ke berkas fallback.
+- **Waktu server Binance** (`GET /api/v3/time`) sebagai acuan `now` untuk
+  keputusan candle closed dan `GENERATED_AT_UTC`, sehingga jam host yang miring
+  tidak bisa menyuntikkan candle setengah-terbentuk. Bila endpoint gagal, jatuh
+  ke jam host dengan peringatan.
+- **Presisi harga dari `PRICE_FILTER.tickSize`** (`exchangeInfo`) — jumlah
+  desimal mengikuti tickSize simbol (mis. `0.01000000` → 2 dp), dengan
+  fallback berbasis magnitudo bila tick tidak tersedia.
+- **Peringatan non-fatal** untuk status simbol non-`TRADING` dan untuk harga
+  saat ini yang tidak wajar (non-positif atau di luar rentang
+  `[low, high]` candle closed terakhir ± 1×ATR).
+- **Output berbasis berkas (default):** prompt **selalu** ditulis ke
+  `./output/<SYMBOL>_<timestamp>.md` lalu disalin ke clipboard (best-effort);
+  `--stdout` menambahkan cetak ke stdout. Jika clipboard tidak tersedia
+  (lingkungan headless), itu hanya peringatan (exit 0).
+- **Mode offline / data lokal (Phase 4)** — `--input-csv` (opsional
+  `--htf-file` / `--ltf-file`) menjalankan tool **tanpa akses jaringan
+  sama sekali** dari berkas CSV OHLCV lokal, dengan keluaran **deterministik**
+  (bisa meregenerasi/meninjau perubahan template tanpa candle live). Jalur
+  jaringan tetap menjadi **default**.
+- **Guard ukuran prompt (Phase 5, #11)** — setelah render, ukuran prompt (byte
+  UTF-8) diperiksa: melewati ambang lunak `PROMPT_BYTES_WARN` (default
+  `120000`) memunculkan `WARN` berisi jumlah byte + perkiraan token; flag
+  opsional `--max-prompt-bytes` menjadi batas keras yang membatalkan dengan
+  `ConfigError` (exit `2`) sebelum berkas ditulis.
+- **`--dry-run` (Phase 5, #16)** — validasi konfigurasi + simbol lalu cetak
+  pengaturan yang diresolusi ke **stderr**, tanpa fetch klines, render, atau
+  menulis berkas (cocok untuk CI/pre-flight).
 - **Tanpa API key**, hanya endpoint **read-only public market data**.
 
 ## Non-Goals (batas keras)
@@ -44,6 +80,16 @@ didelegasikan sepenuhnya kepada LLM yang membaca prompt.
 - **Tidak ada pemrosesan gambar/vision.**
 - **Tidak ada eksekusi order / auto-trading.**
 - Hanya endpoint **read-only public** Binance market data yang dipanggil.
+
+> **Catatan (FVG — Phase 2).** Deteksi **Fair Value Gap (FVG) mekanis** kini
+> **diizinkan** karena FVG adalah **celah harga 3-candle yang murni mekanis dan
+> dapat diturunkan langsung dari OHLC** (bullish bila `low[i] > high[i-2]`,
+> bearish bila `high[i] < low[i-2]`) — tanpa interpretasi apa pun. Karenanya FVG
+> masuk ke lapisan `[FAKTA]`, sama seperti fakta swing/equal-level mekanis.
+> Hal ini **tidak** mengubah non-goal lainnya: DOL, liquidity sweep, dan bias
+> tetap didelegasikan ke LLM. Order Block dan CHoCH/MSS juga tetap diturunkan
+> oleh LLM. Lihat [`docs/DESIGN_SPEC.md`](docs/DESIGN_SPEC.md) §2 (amendemen) dan
+> §4.7.
 
 ## Persyaratan (Requirements)
 
@@ -57,7 +103,8 @@ didelegasikan sepenuhnya kepada LLM yang membaca prompt.
   - [`click`](https://pypi.org/project/click/) `>= 8.1.7`
   - [`jinja2`](https://pypi.org/project/jinja2/) `>= 3.1.2`
 - Catatan clipboard: di Linux headless, `pyperclip` membutuhkan `xclip`/`xsel`.
-  Bila tidak ada, prompt otomatis dialihkan ke berkas fallback.
+  Bila tidak ada, penyalinan dilewati dengan peringatan; berkas `.md` di
+  `--output-dir` tetap selalu tertulis (exit code tetap `0`).
 
 ## Instalasi
 
@@ -79,6 +126,9 @@ pip install -r requirements.txt
 
 # 4. Pasang paket dalam mode editable (opsional, untuk console script)
 pip install -e .
+
+# 5. (Opsional) Pasang extra dev untuk menjalankan test suite
+pip install -e ".[dev]"   # menambahkan pytest
 ```
 
 Setelah `pip install -e .`, skrip konsol `smc-prompt` tersedia di `PATH`.
@@ -89,9 +139,12 @@ Paket juga dapat dijalankan tanpa instalasi melalui `python -m smc_prompt`.
 Bentuk umum:
 
 ```
-smc-prompt <SYMBOL> [--htf-candles N] [--ltf-candles N] [--swing-lookback N]
+smc-prompt <SYMBOL> [--htf-interval I] [--ltf-interval I]
+                     [--htf-candles N] [--ltf-candles N] [--swing-lookback N]
                      [--distance-reference {nearest,most-recent}] [--no-atr]
-                     [--base-url URL] [--output-dir PATH] [--debug]
+                     [--base-url URL] [--output-dir PATH] [--stdout]
+                     [--input-csv FILE] [--htf-file FILE] [--ltf-file FILE]
+                     [--max-prompt-bytes BYTES] [--dry-run] [--debug]
 ```
 
 Entry point yang tersedia:
@@ -116,13 +169,21 @@ dan [`smc_prompt/config.py`](smc_prompt/config.py).
 | Flag / Argumen | Tipe | Default | Keterangan |
 |---|---|---|---|
 | `SYMBOL` | positional `str` | — | Simbol Binance Spot, mis. `BTCUSDT`. Case-insensitive; dinormalisasi ke huruf besar. Wajib diisi. |
-| `--htf-candles` | `int >= 10` | `60` | Jumlah candle **daily tertutup** (closed) pada tabel mentah HTF. |
-| `--ltf-candles` | `int >= 10` | `100` | Jumlah candle **hourly tertutup** (closed) pada tabel mentah LTF. |
+| `--htf-interval` | interval Binance | `1d` | Interval kline Binance untuk seri HTF. Nilai valid: `1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M`. Nilai di luar daftar ditolak dengan exit code `2`. |
+| `--ltf-interval` | interval Binance | `1h` | Interval kline Binance untuk seri LTF. Daftar nilai valid sama dengan `--htf-interval`. |
+| `--htf-candles` | `int >= 10` | `60` | Jumlah candle **HTF-interval tertutup** (closed) pada tabel mentah HTF. |
+| `--ltf-candles` | `int >= 10` | `100` | Jumlah candle **LTF-interval tertutup** (closed) pada tabel mentah LTF. |
 | `--swing-lookback` | `int` ganjil `>= 3` | `5` | Ukuran window fractal `N` untuk deteksi swing. |
 | `--distance-reference` | pilihan: `nearest` \| `most-recent` | `nearest` | Referensi swing untuk perhitungan jarak. `nearest` = swing terdekat berdasarkan jarak harga absolut ke harga saat ini; `most-recent` = swing terbaru berdasarkan timestamp. |
-| `--no-atr` | flag | off (ATR aktif) | Menghilangkan baris ATR(14) dari prompt. Perhitungan ATR tetap dilakukan (dipakai filter swing); hanya tampilan yang disembunyikan. |
+| `--no-atr` | flag | off (ATR aktif) | Menghilangkan baris ATR(14) dari prompt. Diimplementasikan lewat blok Jinja `{% if INCLUDE_ATR %}` di template (bukan pemotongan baris berbasis string). Perhitungan ATR tetap dilakukan (dipakai filter swing); hanya tampilan yang disembunyikan. |
 | `--base-url` | `str` (URL) | `None` | Override host REST Binance. Host ini di-`prepend` ke daftar host default, tetap dengan failover. |
-| `--output-dir` | `path` (folder) | `output` | Direktori untuk berkas fallback clipboard. |
+| `--output-dir` | `path` (folder) | `output` | Direktori untuk berkas prompt `.md` yang dihasilkan. |
+| `--stdout` | flag | off | Selain menulis berkas `.md`, cetak juga prompt ke stdout. |
+| `--input-csv` | `path` (file) | — | **Mode offline (Phase 4).** Baca candle OHLCV dari CSV lokal, bukan dari Binance. Memasok **kedua** timeframe kecuali di-override `--htf-file`/`--ltf-file`. Jalur jaringan tetap default; mode offline hanya aktif bila flag ini diberikan. Lihat bagian "Mode Offline (Data Lokal CSV)". |
+| `--htf-file` | `path` (file) | — | CSV candle HTF untuk mode offline. **Wajib** disertai `--input-csv`; hanya menimpa seri HTF. |
+| `--ltf-file` | `path` (file) | — | CSV candle LTF untuk mode offline. **Wajib** disertai `--input-csv`; hanya menimpa seri LTF. |
+| `--max-prompt-bytes` | `int` | — (nonaktif) | **Batas keras ukuran prompt (Phase 5).** Bila prompt hasil render melebihi jumlah byte ini, tool membatalkan dengan `ConfigError` (exit code `2`) **sebelum** menulis berkas. Nonaktif secara default. |
+| `--dry-run` | flag | off | **Dry run (Phase 5).** Validasi konfigurasi + simbol lalu cetak pengaturan yang diresolusi ke **stderr**, tanpa fetch klines, render, atau menulis berkas. |
 | `--debug` | flag | off | Cetak stack trace saat error. |
 | `--version` | flag | — | Tampilkan versi program lalu keluar. |
 | `-h`, `--help` | flag | — | Tampilkan bantuan lalu keluar. |
@@ -151,14 +212,26 @@ konstanta `DEFAULT_BASE_URLS`.
 
 ### Format Output
 
-- Prompt yang dirender dicetak ke **stdout** dan disalin ke **clipboard**.
-- Pada operasi normal, teks prompt adalah **satu-satunya** konten di stdout;
-  peringatan dan error dikirim ke stderr.
-- Bila clipboard tidak tersedia (lingkungan headless), prompt ditulis ke
-  `output/<SYMBOL>_<YYYYMMDDTHHMMSSZ>.md` dan sebuah peringatan dikirim ke
-  stderr, mis. `output/BTCUSDT_20260913T080934Z.md`.
-- Setiap baris CSV berformat: HTF `YYYY-MM-DD,O,H,L,C` dan LTF
-  `YYYY-MM-DD HH:MM,O,H,L,C` (tanpa header, tanpa kolom indeks).
+- Prompt yang dirender **selalu** ditulis ke
+  `output/<SYMBOL>_<YYYYMMDDTHHMMSSZ>.md`, mis.
+  `output/BTCUSDT_20260913T080934Z.md` — berkas ini adalah artefak utama.
+- Setelah berkas tertulis, prompt disalin ke **clipboard** secara **best-effort**.
+  Bila clipboard tidak tersedia (lingkungan headless), hanya peringatan yang
+  dikirim ke stderr dan exit code tetap `0`.
+- **stdout kosong secara default**; prompt hanya dicetak ke stdout bila Anda
+  memakai flag `--stdout`. Seluruh catatan, peringatan, dan error dikirim ke
+  stderr.
+- Setiap baris CSV berformat: HTF `YYYY-MM-DD,O,H,L,C,V` dan LTF
+  `YYYY-MM-DD HH:MM,O,H,L,C,V` (tanpa header, tanpa kolom indeks; kolom
+  `volume` memakai `fmt_volume` = `str(Decimal)` dari nilai kline apa adanya).
+  Urutan kolom didokumentasikan lewat baris legenda di prosa
+  (`Format kolom: tanggal,open,high,low,close,volume`), bukan baris header.
+- Prompt juga memuat **tabel sequence swing** (oldest→newest, maksimum
+  `swings_table_rows = 12` baris) dengan label HH/HL/LH/LL/EQH/EQL, serta
+  **tabel FVG mekanis** per timeframe di dalam bagian §4 (oldest→newest,
+  maksimum `fvg_table_rows = 8` gap) dengan baris
+  `<stamp>,<FVG_BULLISH|FVG_BEARISH>,<lower>,<upper>,<filled|unfilled>`
+  (atau literal `NONE` bila tidak ada gap).
 
 ---
 
@@ -179,8 +252,10 @@ smc-prompt BTCUSDT
 
 Keluaran yang diharapkan:
 
-- Prompt lengkap tercetak ke **stdout**.
-- Pesan `[smc-prompt] Prompt copied to clipboard.` ke **stderr**.
+- Prompt lengkap tertulis ke `output/BTCUSDT_<YYYYMMDDTHHMMSSZ>.md`.
+- Pesan `[smc-prompt] Prompt written to output/<file>.md.` dan
+  `[smc-prompt] Prompt copied to clipboard.` ke **stderr**.
+- stdout kosong (tanpa teks prompt) secara default.
 - Exit code `0`.
 
 #### 2. Menjalankan tanpa instalasi (via `python -m`)
@@ -217,6 +292,22 @@ Keluaran yang diharapkan: ukuran tabel candle pada prompt mengikuti angka yang
 diminta (`HTF_CANDLE_COUNT` dan `LTF_CANDLE_COUNT`). Bila histori closed yang
 tersedia lebih sedikit, tabel otomatis diperkecil dan sebuah peringatan
 dikirim ke stderr dengan exit code tetap `0`.
+
+#### 4b. Mengubah interval HTF dan LTF
+
+Default adalah HTF `1d` dan LTF `1h`. Kedua interval dapat diubah lewat
+`--htf-interval` / `--ltf-interval`; nilai harus salah satu interval Binance
+(`1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M`). Label pada judul prosa
+prompt (`Ringkasan Data HTF (...)`, `Sequence Swing Terdeteksi LTF (...)`, dan
+`Data Candle Mentah HTF/LTF (...)`) otomatis mengikuti interval yang dipakai.
+
+```bash
+smc-prompt BTCUSDT --htf-interval 4h --ltf-interval 15m
+```
+
+Keluaran yang diharapkan: data kline diambil pada interval `4h` (HTF) dan `15m`
+(LTF); judul prosa prompt menampilkan label `4H` dan `15m`. Nilai interval di
+luar daftar akan gagal dengan exit code `2`.
 
 #### 5. Histori lebih panjang untuk konteks lebih banyak
 
@@ -280,9 +371,9 @@ Keluaran yang diharapkan: permintaan dilayani oleh host yang diberikan. Bila
 host gagal (connection error / HTTP 451 / HTTP 403), CLI berpindah ke host
 fallback berikutnya.
 
-#### 10. Menentukan direktori output untuk berkas fallback
+#### 10. Menentukan direktori output untuk berkas `.md`
 
-Mengarahkan berkas fallback clipboard ke direktori kustom. Direktori dibuat
+Mengarahkan berkas prompt `.md` ke direktori kustom. Direktori dibuat
 otomatis bila belum ada.
 
 ```bash
@@ -291,10 +382,12 @@ smc-prompt BTCUSDT --output-dir ./hasil
 
 Keluaran yang diharapkan:
 
-- Bila clipboard tersedia: prompt tercetak + tersalin, pesan
+- Berkas prompt selalu ditulis ke
+  `./hasil/BTCUSDT_<YYYYMMDDTHHMMSSZ>.md`.
+- Bila clipboard tersedia: prompt juga tersalin, pesan
   `[smc-prompt] Prompt copied to clipboard.` pada stderr.
-- Bila clipboard tidak tersedia (headless): prompt ditulis ke
-  `./hasil/BTCUSDT_<YYYYMMDDTHHMMSSZ>.md` dan peringatan dikirim ke stderr.
+- Bila clipboard tidak tersedia (headless): hanya peringatan yang dikirim ke
+  stderr; berkas prompt tetap ada dan exit code tetap `0`.
 
 #### 11. Mode debug untuk stack trace
 
@@ -335,6 +428,54 @@ Keluaran yang diharapkan:
 - `--version`: menampilkan `smc-prompt, version 0.1.0` (versi dari
   [`smc_prompt/__init__.py`](smc_prompt/__init__.py)).
 
+#### 13b. Dry run — validasi konfigurasi tanpa fetch / tulis berkas (Phase 5)
+
+Berguna untuk CI / pre-flight: memvalidasi konfigurasi + simbol lalu mencetak
+pengaturan yang diresolusi ke **stderr**. Tidak ada klines yang diambil, tidak
+ada berkas yang ditulis.
+
+```bash
+smc-prompt BTCUSDT --dry-run
+smc-prompt BTCUSDT --dry-run --htf-interval 4h --ltf-interval 15m
+```
+
+Keluaran yang diharapkan (stderr):
+
+```text
+[smc-prompt] DRY RUN — no file written, no klines fetched.
+[smc-prompt] symbol=BTCUSDT
+[smc-prompt] data source=Binance network
+[smc-prompt] htf_interval=1d (Daily) ltf_interval=1h (1H)
+[smc-prompt] htf_candles=60 ltf_candles=100 swing_lookback=5
+[smc-prompt] distance_reference=nearest include_atr=True
+[smc-prompt] htf_fetch_limit=110 ltf_fetch_limit=150
+[smc-prompt] output_dir=output stdout=False
+[smc-prompt] volume_mean_period=20 volume_spike_mult=1.5
+[smc-prompt] prompt_bytes_warn=120000 max_prompt_bytes=None
+```
+
+Exit code `0`. Tidak ada berkas `.md` yang dibuat.
+
+#### 13c. Batas keras ukuran prompt (Phase 5)
+
+Membatalkan (exit `2`) bila prompt hasil render melebihi jumlah byte yang
+ditentukan, **sebelum** berkas ditulis. Berguna untuk menjaga prompt tetap di
+bawah batas paste UI chat tujuan.
+
+```bash
+smc-prompt BTCUSDT --max-prompt-bytes 60000
+```
+
+Keluaran yang diharapkan bila terlampaui:
+
+```text
+[smc-prompt] ERROR: Rendered prompt is <n> bytes, exceeding --max-prompt-bytes (60000). Reduce --htf-candles/--ltf-candles or raise the limit.
+```
+
+Tanpa `--max-prompt-bytes`, hanya ambang lunak `PROMPT_BYTES_WARN`
+(default `120000` byte) yang memunculkan `[smc-prompt] WARN:` berisi jumlah byte
+dan perkiraan token; exit code tetap `0`.
+
 #### 14. Contoh kegagalan yang umum (beserta exit code)
 
 Simbol tidak terdaftar di Binance Spot (exit code `3`):
@@ -364,12 +505,77 @@ smc-prompt BTCUSDT --htf-candles 5
 Keluaran yang diharapkan:
 `[smc-prompt] ERROR: --htf-candles must be an integer >= 10.`
 
-#### Catatan: mode offline / data lokal
+Interval tidak valid, mis. `--htf-interval 2H` (exit code `2`):
 
-**Tidak ada** opsi CLI untuk menjalankan secara offline atau membaca data OHLC
-lokal. `smc-prompt` selalu mengambil data live dari Binance public REST API.
-Bila jaringan tidak tersedia atau host tidak dapat dijangkau setelah retry,
-CLI gagal dengan `NetworkError` (exit code `4`).
+```bash
+smc-prompt BTCUSDT --htf-interval 2H
+```
+
+Keluaran yang diharapkan:
+`[smc-prompt] ERROR: --htf-interval must be one of: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M.`
+
+---
+
+## Mode Offline (Data Lokal CSV)
+
+Mulai Phase 4, `smc-prompt` dapat dijalankan **tanpa akses jaringan sama
+sekali** dengan membaca candle OHLCV dari berkas CSV lokal. Ini berguna untuk
+meregenerasi dan meninjau perubahan template secara **byte-for-byte** tanpa
+candle live. **Jalur jaringan tetap menjadi default** — mode offline hanya aktif
+bila flag `--input-csv` diberikan.
+
+### Schema CSV
+
+Satu berkas per timeframe, **baris header wajib**:
+
+```
+open_time,open,high,low,close,volume[,close_time]
+```
+
+| Kolom | Wajib | Format |
+|---|---|---|
+| `open_time` | ya | ISO-8601 UTC (`2026-07-15T00:00:00Z` / `... +00:00` / `2026-07-15 00:00` / `2026-07-15`); nilai bilangan bulat murni diartikan sebagai **epoch milidetik** |
+| `open` | ya | string desimal (`Decimal`) |
+| `high` | ya | string desimal |
+| `low` | ya | string desimal |
+| `close` | ya | string desimal |
+| `volume` | ya | string desimal (dirender via `fmt_volume`, byte-stable) |
+| `close_time` | tidak | aturan timestamp sama dengan `open_time`; bila tidak ada, diturunkan sebagai `open_time + delta`, dengan `delta` = selang positif pertama antar `open_time` berurutan |
+
+Catatan:
+- Nama kolom **case-insensitive**; kolom tambahan diabaikan; baris diurutkan
+  secara kronologis sebelum analisis.
+- Setiap baris dianggap **sudah tertutup (closed)** — snapshot offline memang
+  histori closed — sehingga render offline deterministik dan tidak bergantung
+  pada jam host.
+- `GENERATED_AT_UTC` diturunkan sebagai `max(close_time) + 1 detik` dari data,
+  jadi **nama berkas output dan seluruh isi prompt adalah fungsi murni dari
+  berkas input**.
+- Harga saat ini (current price) offline = **close candle LTF closed terakhir**.
+- Mode offline memerlukan `--htf-interval` dan `--ltf-interval` yang **berbeda**
+  (satu CSV memetakan tepat ke satu timeframe).
+
+### Contoh
+
+Memakai satu berkas untuk kedua timeframe:
+
+```bash
+smc-prompt BTCUSDT --input-csv candles_1d.csv
+```
+
+Memakai berkas terpisah untuk HTF dan LTF:
+
+```bash
+smc-prompt BTCUSDT --input-csv candles_1d.csv \
+  --htf-file candles_1d.csv --ltf-file candles_1h.csv
+```
+
+Keluaran yang diharapkan: prompt lengkap tertulis ke
+`output/BTCUSDT_<stamp>.md` dengan nilai `GENERATED_AT_UTC` yang diturunkan dari
+CSV (deterministik), **tanpa** panggilan jaringan apa pun.
+
+`--htf-file` / `--ltf-file` **wajib** disertai `--input-csv`; memberikannya tanpa
+`--input-csv` akan gagal dengan exit code `2`.
 
 ---
 
@@ -384,8 +590,13 @@ Konstanta penting (`smc_prompt/config.py`):
 
 | Konstanta | Default | Keterangan |
 |---|---|---|
-| `HTF_INTERVAL` | `1d` | Interval kline Binance untuk HTF. |
-| `LTF_INTERVAL` | `1h` | Interval kline Binance untuk LTF. |
+| `HTF_INTERVAL` | `1d` | Default `--htf-interval` (interval kline Binance untuk HTF). |
+| `LTF_INTERVAL` | `1h` | Default `--ltf-interval` (interval kline Binance untuk LTF). |
+| `TIME_PATH` | `/api/v3/time` | Endpoint waktu server Binance untuk keputusan candle closed dan `GENERATED_AT_UTC`. |
+| `EXCHANGE_INFO_PATH` | `/api/v3/exchangeInfo` | Sumber `PRICE_FILTER.tickSize` (presisi harga) dan `status` simbol. |
+| `MAX_PRICE_DECIMALS` | `8` | Batas atas desimal harga dari tickSize. |
+| `BINANCE_INTERVALS` | `(1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M)` | Himpunan interval kline Binance yang valid (dipakai untuk validasi `--htf-interval`/`--ltf-interval`). |
+| `INTERVAL_LABELS` | `{1d: Daily, 1h: 1H, 4h: 4H, ...}` | Pemetaan interval → label yang dirender pada judul prosa prompt. |
 | `DEFAULT_BASE_URLS` | `(https://api.binance.com, https://data-api.binance.vision)` | Daftar host fallback yang dapat di-override. |
 | `DEFAULT_HTF_CANDLES` | `60` | Default `--htf-candles`. |
 | `DEFAULT_LTF_CANDLES` | `100` | Default `--ltf-candles`. |
@@ -394,12 +605,20 @@ Konstanta penting (`smc_prompt/config.py`):
 | `DEFAULT_ATR_PERIOD` | `14` | Lookback ATR. |
 | `DEFAULT_STRUCTURE_MIN_SWINGS` | `4` | Minimum swing untuk mencoba klasifikasi. |
 | `DEFAULT_STRUCTURE_LAST_SWINGS` | `6` | Jumlah swing terakhir untuk klasifikasi. |
+| `DEFAULT_SWINGS_TABLE_ROWS` | `12` | Jumlah baris tabel sequence swing yang dirender (swing terakhir). |
+| `DEFAULT_EQUAL_LEVELS_ATR_MULT` | `0.1` | Toleransi equal highs/lows (`× ATR(14)`) dan penurunan label EQH/EQL. |
+| `DEFAULT_FVG_ATR_MULT` | `0.1` | Ukuran minimum Fair Value Gap (`× ATR(14)`); gap lebih kecil dianggap sub-noise dan dibuang. |
+| `DEFAULT_FVG_TABLE_ROWS` | `8` | Jumlah FVG terbaru yang dirender per tabel timeframe (menjadi `fvg_table_rows`). |
 | `DEFAULT_CONTEXT_BUFFER` | `50` | Candle ekstra yang di-fetch agar swing di tepi kiri tabel tetap terdeteksi. |
 | `FETCH_LIMIT_MAX` | `1000` | Batas keras klines Binance. |
 | `DEFAULT_REQUEST_TIMEOUT` | `10.0` | Timeout per request (detik). |
 | `DEFAULT_RETRY_MAX` | `3` | Jumlah percobaan ulang. |
-| `DEFAULT_OUTPUT_DIR` | `output` | Direktori fallback clipboard. |
+| `DEFAULT_OUTPUT_DIR` | `output` | Direktori berkas prompt `.md`. |
 | `DEFAULT_DELISTED_ZERO_VOLUME_STREAK` | `3` | Ambang peringatan zero-volume. |
+| `DEFAULT_VOLUME_MEAN_PERIOD` | `20` | Lookback rata-rata volume untuk volume relatif (`last / mean(N)`). |
+| `DEFAULT_VOLUME_SPIKE_MULT` | `1.5` | Candle ditandai spike volume bila volume relatif `≥` nilai ini. |
+| `PROMPT_BYTES_WARN` | `120000` | Ambang peringatan lunak ukuran prompt pasca-render (byte); `None` menonaktifkan. |
+| `PROMPT_BYTES_PER_TOKEN` | `4` | Pembagi untuk memperkirakan jumlah token pada peringatan ukuran. |
 | `MIN_CANDLES` | `10` | Minimum candle yang diminta. |
 | `MIN_SWING_LOOKBACK` | `3` | Minimum window fractal. |
 
@@ -413,23 +632,49 @@ smc_prompt/
 ├── __init__.py            # konstanta versi paket
 ├── __main__.py            # memungkinkan `python -m smc_prompt`
 ├── cli.py                 # entrypoint Click + orkestrasi (satu-satunya penulis stdout/stderr)
-├── config.py              # default imutabel, string interval, aturan format
+├── config.py              # default imutabel, string interval, aturan format, PriceFormat (tickSize)
 ├── models.py              # dataclass / kontrak payload bertipe
-├── errors.py              # hierarki exception (memetakan exit code)
-├── data_fetcher.py        # klien REST Binance + retry/backoff + failover host
+├── errors.py              # hierarki exception (memetakan exit code) + warning non-fatal
+├── data_fetcher.py        # klien REST Binance (klines/ticker/exchangeInfo/time) + retry/backoff + failover
 ├── structure_analyzer.py  # deteksi swing, klasifikasi, jarak, ATR
 ├── template_renderer.py   # pembangun placeholder + render Jinja2
-├── output.py              # clipboard + fallback berkas
+├── output.py              # tulis berkas .md + salin clipboard (best-effort)
 └── templates/
     └── prompt_template.j2 # template prompt (byte-frozen)
 
 docs/
 └── DESIGN_SPEC.md         # spesifikasi desain beku
 
-pyproject.toml             # metadata paket, dependensi, entry point
+pyproject.toml             # metadata paket, dependensi, entry point, extra [dev]
 requirements.txt           # daftar dependensi runtime
 README.md                  # dokumen ini
 ```
+
+### Tests
+
+Suite uji berbasis **pytest**, **tanpa jaringan** (fetcher tidak pernah dipanggil
+tanpa mock; jalur data memakai sumber CSV offline). Suite mencakup:
+`detect_swings` (equal highs + tabrakan ATR), `classify_structure`
+(HH/HL, LH/LL, mixed/ranging, equal-levels, kasus < 2 highs), `fmt_distance`
+(sign/magnitudo), `prepare_series` + `InsufficientDataError`, `enforce_alternation`,
+`detect_equal_levels`, `detect_fvg` (bounds/birth_time/filled/sub-noise), derivasi
+`tickSize → desimal`, skema CSV + parity data source, dan satu **golden test**
+yang memakukan hash prompt byte-for-byte.
+
+```bash
+# Pasang extra dev (pytest) lalu jalankan suite
+pip install -e ".[dev]"
+pytest
+```
+
+Fixture deterministik ada di `tests/fixtures/` (`htf_daily.csv`,
+`ltf_hourly.csv`). Regenerasi dengan
+`python tests/fixtures/generate_fixtures.py` lalu tinjau diff-nya. Hash golden
+yang dipatok adalah
+`f5a47d8fac567316102faf9a8c19e0a3130d65bb4272b74b0b71f0ebd8bd30c7`
+(`18684` byte). Bila template atau placeholder berubah, regenerasi berkas
+lalu perbarui `GOLDEN_SHA256`/`GOLDEN_BYTES` di
+[`tests/conftest.py`](tests/conftest.py) setelah meninjau diff byte-for-byte.
 
 ## Klasifikasi Struktur
 
@@ -439,19 +684,81 @@ README.md                  # dokumen ini
   low terakhir membentuk Higher Low.
 - **Bearish** — dua swing high terakhir membentuk Lower High **dan** dua swing
   low terakhir membentuk Lower Low.
+- **Equal Highs/Lows** — dua swing high terakhir **dan** dua swing low terakhir
+  masing-masing berada dalam toleransi `0.1 × ATR(14)` (liquidity pool). Ini
+  fakta tersendiri, sengaja **tidak** dilebur ke `Ranging/Mixed`.
 - **Ranging/Mixed** — selain di atas, atau kurang dari dua high / dua low.
 
 ## Deteksi Swing
 
 N-bar Williams Fractal (default `N = 5`) dengan post-filter deterministik: dua
 swing sejenis berurutan yang berjarak kurang dari `0.5 × ATR(14)` digabung,
-menyisakan yang lebih ekstrem. Tanpa random, tanpa rekursi, tanpa lookahead
-melebihi window.
+menyisakan yang lebih ekstrem. Sebuah post-pass O(n) (`enforce_alternation`)
+lalu memampatkan setiap rentetan swing sejenis menjadi satu titik paling ekstrem
+(max untuk HIGH, min untuk LOW) sehingga dihasilkan skeleton `H/L/H/L` yang
+benar-benar bergantian. Tanpa random, tanpa rekursi, tanpa lookahead melebihi
+window.
 
 Candle terakhir yang **belum tertutup (half-open) dikecualikan** dari seluruh
 perhitungan swing, ATR, klasifikasi, dan tabel. Candle tersebut hanya dipakai
 sebagai fallback harga saat ini bila endpoint ticker tidak tersedia (endpoint
 ticker adalah sumber utama).
+
+## Fair Value Gap (FVG) Mekanis
+
+FVG dihitung secara **murni mekanis** dari OHLC (tanpa interpretasi), sehingga
+masuk lapisan `[FAKTA]`. `detect_fvg(candles, min_gap_atr_mult, *, atr_value)`
+memindai seri closed satu kali:
+
+- **Bullish FVG** pada candle `i` bila `low[i] > high[i-2]`; rentang
+  `[lower, upper] = [high[i-2], low[i]]`.
+- **Bearish FVG** pada candle `i` bila `high[i] < low[i-2]`; rentang
+  `[lower, upper] = [high[i], low[i-2]]`.
+
+Setiap FVG menyimpan rentang harga (`lower`/`upper`), arah (`bullish`/`bearish`),
+**timestamp lahir** (open time candle ke-3), dan flag `filled`. **Filter
+sub-noise:** gap yang lebih sempit dari `fvg_atr_mult × ATR(14)` (default `0.1`)
+dibuang.
+
+**Status fill.** Bullish FVG `filled` bila ada candle **closed** setelahnya dengan
+`low <= lower`; bearish FVG `filled` bila ada candle setelahnya dengan
+`high >= upper`. Mekanis, hanya seri closed, tanpa lookahead melebihi window
+3 candle.
+
+`fvg_table_rows` (default `8`) FVG terbaru per timeframe dirender sebagai blok
+berpagar di dalam bagian §4 template; literal `NONE` dipakai bila tidak ada gap.
+Baris: `<stamp>,<FVG_BULLISH|FVG_BEARISH>,<lower>,<upper>,<filled|unfilled>`.
+
+## Sinyal Turunan ATR & Volume (Phase 5)
+
+Phase 5 menambah fakta **mekanis murni** (lapisan `[FAKTA]`) ke Layer A:
+
+- **Jarak ternormalisasi ATR (#6).** Selain jarak persen/absolut, tiap swing
+  kini menyertakan `x{abs_distance / ATR(14):.2f}×ATR` (mis. `x2.85×ATR(14)`).
+  Placeholder: `HTF_DIST_TO_HIGH_ATR` / `HTF_DIST_TO_LOW_ATR` (dan ekuivalen
+  LTF). **Guard:** bila ATR `None` atau `0`, nilai menjadi literal `n/a`
+  (tidak pernah terjadi divide-by-zero).
+- **ATR sebagai persentase harga (#6).** Baris ringkas `ATR ≈ 2.93% of price`
+  (`{{ATR_PCT_OF_PRICE}}`) dihitung dari `ATR(14) / current_price × 100`,
+  `abs`, 2 desimal; jatuh ke `n/a` bila ATR tak tersedia / harga non-positif.
+- **Volume relatif & flag spike (#16).** `compute_relative_volume` menghitung
+  `last / mean(N)` atas `N = volume_mean_period` (default `20`) candle closed
+  terakhir, dikuantisasi 4 desimal untuk byte-stability. Candle ditandai spike
+  bila `relative ≥ volume_spike_mult` (default `1.5`). Placeholder:
+  `*_VOLUME_RELATIVE` (mis. `x1.05`) dan `*_VOLUME_SPIKE`
+  (`yes` / `no` / `unknown`). **Guard:** kurang dari 2 candle → `n/a`; mean nol
+  (mis. simbol halt/delisted) → `relative = 0` sehingga tak ada divide-by-zero.
+
+## Guard Ukuran Prompt (Phase 5, #11)
+
+Setelah render, ukuran prompt dihitung dalam **byte UTF-8**:
+
+- Bila melebihi ambang lunak `PROMPT_BYTES_WARN` (default `120000`), sebuah
+  `[smc-prompt] WARN: Rendered prompt is <n> bytes (~<t> tokens), above the
+  120000-byte warning threshold.` dikirim ke stderr (perkiraan token =
+  `bytes / PROMPT_BYTES_PER_TOKEN`, default `4`); exit code tetap `0`.
+- Bila flag `--max-prompt-bytes` diberikan dan terlampaui, tool membatalkan
+  dengan `ConfigError` (exit code `2`) **sebelum** berkas ditulis.
 
 ## Exit Codes
 
@@ -463,39 +770,76 @@ ticker adalah sumber utama).
 | 3 | Simbol tidak terdaftar di Binance Spot. |
 | 4 | Binance API tidak dapat dijangkau setelah retry. |
 | 5 | Histori closed tidak cukup untuk menghitung struktur. |
-| 6 | Gagal menyalin ke clipboard atau menulis berkas fallback. |
+| 6 | Gagal menulis berkas prompt `.md` output. |
 
 ## Troubleshooting
 
-- **`Clipboard unavailable ... Wrote prompt to <path>`** — lingkungan headless
-  atau `xclip`/`xsel` tidak terpasang. Prompt tetap tersedia di berkas fallback
-  pada `--output-dir`; tidak ada tindakan tambahan yang diperlukan.
+- **`Clipboard unavailable ... Prompt written to <path>`** — lingkungan headless
+  atau `xclip`/`xsel` tidak terpasang. Ini **hanya peringatan** (exit code tetap
+  `0`); berkas prompt sudah tertulis di `--output-dir`; tidak ada tindakan
+  tambahan yang diperlukan.
 - **`Symbol '<SYM>' is not listed on Binance Spot` (exit 3)** — periksa ejaan
   simbol; gunakan format seperti `BTCUSDT` (base + quote, tanpa pemisah).
 - **`Binance API unreachable ...` (exit 4)** — masalah jaringan atau host
   terblokir (mis. HTTP 451 geo-block). Coba
   `--base-url https://data-api.binance.vision`.
 - **`Not enough closed <tf> history ...` (exit 5)** — histori closed tidak
-  mencukupi. **Tidak ada** mode data lokal/offline; gunakan simbol dengan
-  histori cukup.
+  mencukupi. Gunakan simbol dengan histori cukup, atau (mode offline) berkas CSV
+  dengan lebih banyak baris.
+- **`Offline CSV ...` (exit 2)** — berkas CSV tidak ditemukan, kolom wajib
+  hilang, isi kosong, atau ada timestamp/angka yang tidak valid. Periksa header
+  `open_time,open,high,low,close,volume` dan format nilainya (lihat "Mode Offline").
+- **`--htf-file / --ltf-file require --input-csv ...` (exit 2)** — flag berkas
+  per-timeframe butuh `--input-csv` agar mode offline aktif secara eksplisit.
+- **`Rendered prompt is <n> bytes, exceeding --max-prompt-bytes ...` (exit 2)** —
+  prompt melebihi batas keras. Turunkan `--htf-candles`/`--ltf-candles` atau
+  naikkan `--max-prompt-bytes`. Bila hanya peringatan lunak yang muncul (tanpa
+  `--max-prompt-bytes`), prompt tetap ditulis (exit `0`).
 - **Argumen ditolak (exit 2)** — pastikan `--swing-lookback` ganjil `>= 3` dan
   `--htf-candles`/`--ltf-candles` `>= 10`.
 - **Karakter non-ASCII pada Windows** — CLI memaksa stream stdout/stderr ke
   UTF-8 secara otomatis; tidak perlu konfigurasi manual.
+- **`Symbol <SYM> has exchange status '<status>' (not TRADING)` (peringatan)** —
+  simbol terdaftar tetapi pasar sedang tidak trading (mis. `BREAK`). Prompt
+  tetap dihasilkan dari data historis; ini hanya peringatan (exit code `0`).
+- **`Ticker price rejected ... Using last closed <tf> candle close ...` (peringatan)** —
+  harga ticker non-positif atau di luar rentang wajar; tool memakai close candle
+  closed terakhir. Hanya peringatan (exit code `0`).
+- **`Binance server time unavailable ... falling back to the host clock` (peringatan)** —
+  endpoint waktu server tidak dapat dijangkau; tool memakai jam host untuk
+  keputusan candle closed dan `GENERATED_AT_UTC`. Hanya peringatan (exit code `0`).
 
 ## Catatan dan Batasan Diketahui
 
-- **Presisi harga dipilih berdasarkan magnitudo**, bukan tick size simbol:
-  `>= 1000` → 2 desimal, `>= 1` → 4 desimal, `< 1` → 8 desimal. Pasangan
-  berharga sangat rendah mungkin memerlukan presisi berbasis tick size
-  (penyempurnaan yang didokumentasikan).
+- **Peringatan sanity referensi (non-fatal).** Bila `structure_class` Bullish
+  tetapi swing low terdekat sudah berada **di atas** harga saat ini (level
+  rusak), atau Bearish tetapi swing high terdekat sudah **di bawah** harga,
+  `reference_sanity_warnings` mengeluarkan baris `[smc-prompt] WARN:` ke stderr.
+  Prompt tetap dirender dengan fakta mentah; exit code tetap `0`.
+- **Presisi harga diturunkan dari tick size simbol** (`PRICE_FILTER.tickSize`
+  dari `exchangeInfo`): jumlah desimal mengikuti tickSize (mis.
+  `0.01000000` → 2 dp, `0.00000100` → 6 dp, `1.00000000` → 0 dp), dibatasi 8 dp.
+  Bila tick tidak tersedia/tidak dapat diparse, fallback ke aturan berbasis
+  magnitudo: `>= 1000` → 2 desimal, `>= 1` → 4 desimal, `< 1` → 8 desimal.
+  Kedua jalur deterministik; untuk sampel BTCUSDT beku keduanya identik.
+- **Waktu closure memakai jam server Binance** (`GET /api/v3/time`), bukan jam
+  host, sehingga jam host yang miring tidak mengklasifikasi candle terakhir
+  secara keliru. Bila server time tidak tersedia, jam host dipakai dengan
+  peringatan `[smc-prompt] WARN:` dan exit code tetap `0`.
+- **Peringatan status simbol non-fatal.** Bila `status` simbol dari
+  `exchangeInfo` bukan `TRADING` (mis. `BREAK`/`HALT`), sebuah
+  `[smc-prompt] WARN:` dikirim ke stderr. Prompt tetap dirender dengan fakta
+  mentah; exit code tetap `0`.
+- **Peringatan harga saat ini (sanity).** Harga ticker yang non-positif atau
+  berada di luar rentang `[low, high]` candle closed LTF terakhir ± 1×ATR
+  ditolak dan diganti dengan close candle closed terakhir, disertai
+  `[smc-prompt] WARN:`. Prompt tetap dirender; exit code tetap `0`.
 - **`half = (N-1)/2` bar closed terbaru tidak pernah bisa menjadi swing**,
   sehingga swing yang dilaporkan bisa tertinggal beberapa bar. Ini melekat pada
   metode fractal.
 - **Heuristik zero-volume untuk simbol delisted hanyalah peringatan** (exit 0).
   Pasangan bervolume rendah namun tetap tradable dapat memicu peringatan palsu.
-- Semua timestamp adalah **UTC**; jam host dipakai untuk memutuskan "apakah
-  candle terakhir sudah closed?".
+- Semua timestamp adalah **UTC**.
 - Prompt tidak disanitasi terhadap prompt-injection, tetapi seluruh konten yang
   disuntikkan adalah data numerik/simbol yang dikendalikan oleh alat ini.
 

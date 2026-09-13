@@ -7,25 +7,62 @@ Bertindaklah sebagai **Senior ICT/SMC Trading Analyst**. Analisis dilakukan meng
 
 > Data di bawah dihasilkan otomatis dari live market data API (Binance), BUKAN dari observasi visual chart. Perlakukan seluruh angka sebagai [FAKTA] terverifikasi. Anda tidak memiliki akses ke bentuk visual candle/wick di luar angka OHLC yang diberikan — jangan berasumsi detail visual yang tidak tercermin dalam angka ini.
 
-### Ringkasan Data HTF (Daily)
+### Ringkasan Data HTF ({{HTF_INTERVAL_LABEL}})
 - Current price: {{CURRENT_PRICE}}
+- ATR ≈ {{ATR_PCT_OF_PRICE}} (ATR(14) HTF)
 - Klasifikasi struktur (mekanis): {{HTF_STRUCTURE_CLASS}}
-- Swing high terdeteksi: {{HTF_SWING_HIGH}} pada {{HTF_SWING_HIGH_DATE}} (jarak dari current: {{HTF_DIST_TO_HIGH}})
-- Swing low terdeteksi: {{HTF_SWING_LOW}} pada {{HTF_SWING_LOW_DATE}} (jarak dari current: {{HTF_DIST_TO_LOW}})
+- Swing high terdeteksi: {{HTF_SWING_HIGH}} pada {{HTF_SWING_HIGH_DATE}} (jarak dari current: {{HTF_DIST_TO_HIGH}}, {{HTF_DIST_TO_HIGH_ATR}}×ATR(14))
+- Swing low terdeteksi: {{HTF_SWING_LOW}} pada {{HTF_SWING_LOW_DATE}} (jarak dari current: {{HTF_DIST_TO_LOW}}, {{HTF_DIST_TO_LOW_ATR}}×ATR(14))
+{% if INCLUDE_ATR %}
 - ATR(14): {{HTF_ATR14}} (opsional)
+{% endif %}
+- Equal Highs (liquidity pool): {{HTF_EQUAL_HIGHS}}
+- Equal Lows (liquidity pool): {{HTF_EQUAL_LOWS}}
+- Volume candle terakhir (relatif thd rata-rata N candle, spike bila ≥ ambang): {{HTF_VOLUME_RELATIVE}}, spike: {{HTF_VOLUME_SPIKE}}
+- Referensi HIGH terbaru (most-recent): {{HTF_REF_HIGH_RECENT}}
+- Referensi LOW terbaru (most-recent): {{HTF_REF_LOW_RECENT}}
+- Referensi HIGH terdekat (nearest): {{HTF_REF_HIGH_NEAREST}}
+- Referensi LOW terdekat (nearest): {{HTF_REF_LOW_NEAREST}}
+- Referensi HIGH ekstrem window: {{HTF_REF_HIGH_WINDOW_MAX}}
+- Referensi LOW ekstrem window: {{HTF_REF_LOW_WINDOW_MIN}}
 
-### Data Candle Mentah HTF (Daily, {{HTF_CANDLE_COUNT}} candle terakhir, closed)
+### Sequence Swing Terdeteksi HTF ({{HTF_INTERVAL_LABEL}}, oldest→newest)
+Label: HH=Higher High, HL=Higher Low, LH=Lower High, LL=Lower Low, EQH=Equal High, EQL=Equal Low, '-'=swing pertama tipe tsb. Kolom: tanggal,tipe,level,label.
+```
+{{HTF_SWINGS_TABLE}}
+```
+
+### Data Candle Mentah HTF ({{HTF_INTERVAL_LABEL}}, {{HTF_CANDLE_COUNT}} candle terakhir, closed)
+Format kolom: tanggal,open,high,low,close,volume
 ```
 {{HTF_CANDLE_TABLE_CSV}}
 ```
 
-### Ringkasan Data LTF (1H)
+### Ringkasan Data LTF ({{LTF_INTERVAL_LABEL}})
 - Klasifikasi struktur (mekanis): {{LTF_STRUCTURE_CLASS}}
-- Swing high terdeteksi: {{LTF_SWING_HIGH}} pada {{LTF_SWING_HIGH_DATE}} (jarak dari current: {{LTF_DIST_TO_HIGH}})
-- Swing low terdeteksi: {{LTF_SWING_LOW}} pada {{LTF_SWING_LOW_DATE}} (jarak dari current: {{LTF_DIST_TO_LOW}})
+- Swing high terdeteksi: {{LTF_SWING_HIGH}} pada {{LTF_SWING_HIGH_DATE}} (jarak dari current: {{LTF_DIST_TO_HIGH}}, {{LTF_DIST_TO_HIGH_ATR}}×ATR(14))
+- Swing low terdeteksi: {{LTF_SWING_LOW}} pada {{LTF_SWING_LOW_DATE}} (jarak dari current: {{LTF_DIST_TO_LOW}}, {{LTF_DIST_TO_LOW_ATR}}×ATR(14))
+{% if INCLUDE_ATR %}
 - ATR(14): {{LTF_ATR14}} (opsional)
+{% endif %}
+- Equal Highs (liquidity pool): {{LTF_EQUAL_HIGHS}}
+- Equal Lows (liquidity pool): {{LTF_EQUAL_LOWS}}
+- Volume candle terakhir (relatif thd rata-rata N candle, spike bila ≥ ambang): {{LTF_VOLUME_RELATIVE}}, spike: {{LTF_VOLUME_SPIKE}}
+- Referensi HIGH terbaru (most-recent): {{LTF_REF_HIGH_RECENT}}
+- Referensi LOW terbaru (most-recent): {{LTF_REF_LOW_RECENT}}
+- Referensi HIGH terdekat (nearest): {{LTF_REF_HIGH_NEAREST}}
+- Referensi LOW terdekat (nearest): {{LTF_REF_LOW_NEAREST}}
+- Referensi HIGH ekstrem window: {{LTF_REF_HIGH_WINDOW_MAX}}
+- Referensi LOW ekstrem window: {{LTF_REF_LOW_WINDOW_MIN}}
 
-### Data Candle Mentah LTF (1H, {{LTF_CANDLE_COUNT}} candle terakhir, closed)
+### Sequence Swing Terdeteksi LTF ({{LTF_INTERVAL_LABEL}}, oldest→newest)
+Label: HH=Higher High, HL=Higher Low, LH=Lower High, LL=Lower Low, EQH=Equal High, EQL=Equal Low, '-'=swing pertama tipe tsb. Kolom: datetime,tipe,level,label.
+```
+{{LTF_SWINGS_TABLE}}
+```
+
+### Data Candle Mentah LTF ({{LTF_INTERVAL_LABEL}}, {{LTF_CANDLE_COUNT}} candle terakhir, closed)
+Format kolom: datetime,open,high,low,close,volume
 ```
 {{LTF_CANDLE_TABLE_CSV}}
 ```
@@ -64,6 +101,18 @@ Hindari klaim absolut ("pasti", "dijamin", "akan"). Gunakan kalibrasi probabilit
 
 - Jelaskan skenario _liquidity sweep / stop hunt_ terhadap level 2a-2b menuju pool di poin 3, berdasarkan sequence candle mentah di atas. [SPEKULASI]
 - Entry HANYA dikonfirmasi setelah manipulasi terjadi, via: CHoCH, MSS, FVG, atau OB — identifikasi dari tabel candle mentah di atas. [FAKTA setelah terjadi]
+
+### FVG Mekanis HTF ({{HTF_INTERVAL_LABEL}}, oldest→newest, terbaru maks. {{HTF_FVG_COUNT}})
+[FAKTA] Fair Value Gap 3-candle murni mekanis: bullish bila low[i] > high[i-2] (range [high[i-2], low[i]]), bearish bila high[i] < low[i-2] (range [high[i], low[i-2]]); gap di bawah {{HTF_FVG_ATR_MULT}}×ATR disaring. Kolom: tanggal,tipe,lower,upper,status (filled bila candle setelahnya menembus penuh rentang).
+```
+{{HTF_FVG_TABLE}}
+```
+
+### FVG Mekanis LTF ({{LTF_INTERVAL_LABEL}}, oldest→newest, terbaru maks. {{LTF_FVG_COUNT}})
+[FAKTA] Fair Value Gap 3-candle murni mekanis: bullish bila low[i] > high[i-2] (range [high[i-2], low[i]]), bearish bila high[i] < low[i-2] (range [high[i], low[i-2]]); gap di bawah {{LTF_FVG_ATR_MULT}}×ATR disaring. Kolom: datetime,tipe,lower,upper,status (filled bila candle setelahnya menembus penuh rentang).
+```
+{{LTF_FVG_TABLE}}
+```
 
 ## 5. Trading Plan
 

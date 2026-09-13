@@ -1,8 +1,10 @@
-"""Deliver the rendered prompt: clipboard first, file fallback second.
+"""Deliver the rendered prompt: write the Markdown file, then best-effort clipboard.
 
-The clipboard path uses ``pyperclip``; on headless systems (no xclip/xsel) it
-raises and we fall back to ``./output/<SYMBOL>_<timestamp>.md``. If both fail
-the tool raises :class:`OutputError` (exit 6).
+The ``.md`` file is the primary artifact and is **always** written to
+``<output_dir>/<SYMBOL>_<YYYYMMDDTHHMMSSZ>.md``; failing to write it raises
+:class:`OutputError` (exit 6). Copying to the clipboard happens afterwards and is
+best-effort: when ``pyperclip`` fails (e.g. a headless system without
+xclip/xsel) the failure is surfaced as a warning while the exit code stays 0.
 """
 
 from __future__ import annotations
@@ -21,19 +23,26 @@ from .errors import ClipboardUnavailable, OutputError
 class DeliveryResult:
     """Outcome of a delivery attempt."""
 
+    output_path: Path
     copied_to_clipboard: bool
-    fallback_path: Path | None
     clipboard_error: str | None
 
     @property
-    def used_fallback(self) -> bool:
-        return self.fallback_path is not None
+    def clipboard_warning(self) -> str | None:
+        """Warning text when the clipboard copy failed, else ``None``."""
+
+        if self.clipboard_error is None:
+            return None
+        return (
+            f"Clipboard unavailable ({self.clipboard_error}). "
+            f"Prompt written to {self.output_path}."
+        )
 
 
-def make_fallback_path(symbol: str, output_dir: str, moment: datetime) -> Path:
+def make_output_path(symbol: str, output_dir: str, moment: datetime) -> Path:
     """``<output_dir>/<SYMBOL>_<YYYYMMDDTHHMMSSZ>.md`` (spec §11)."""
 
-    stamp = cfg.fmt_fallback_stamp(moment)
+    stamp = cfg.fmt_output_stamp(moment)
     return Path(output_dir) / f"{symbol.upper()}_{stamp}.md"
 
 
@@ -49,8 +58,11 @@ def copy_to_clipboard(text: str) -> None:
         raise ClipboardUnavailable(f"{type(exc).__name__}: {exc}") from exc
 
 
-def write_fallback_file(path: Path, text: str) -> Path:
-    """Write the prompt to ``path``, creating parent directories as needed."""
+def write_output_file(path: Path, text: str) -> Path:
+    """Write the prompt to ``path``, creating parent directories as needed.
+
+    Raises :class:`OutputError` (exit 6) when the file cannot be written.
+    """
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,7 +70,7 @@ def write_fallback_file(path: Path, text: str) -> Path:
             handle.write(text)
     except OSError as exc:
         raise OutputError(
-            f"Could not copy to clipboard or write fallback file ({exc})."
+            f"Could not write prompt to {path} ({exc})."
         ) from exc
     return path
 
@@ -70,17 +82,17 @@ def deliver(
     output_dir: str = cfg.DEFAULT_OUTPUT_DIR,
     moment: datetime | None = None,
 ) -> DeliveryResult:
-    """Copy to clipboard; fall back to a file on a headless environment."""
+    """Write the prompt to a ``.md`` file, then best-effort copy to clipboard."""
+
+    path = make_output_path(
+        symbol, output_dir, moment or datetime.now(timezone.utc)
+    )
+    write_output_file(path, text)
 
     clipboard_error: str | None = None
     try:
         copy_to_clipboard(text)
-        return DeliveryResult(True, None, None)
     except ClipboardUnavailable as exc:
         clipboard_error = str(exc)
 
-    fallback = make_fallback_path(
-        symbol, output_dir, moment or datetime.now(timezone.utc)
-    )
-    write_fallback_file(fallback, text)
-    return DeliveryResult(False, fallback, clipboard_error)
+    return DeliveryResult(path, clipboard_error is None, clipboard_error)

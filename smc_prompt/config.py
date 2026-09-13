@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Sequence
 
 from .errors import ConfigError
@@ -21,9 +21,75 @@ from .errors import ConfigError
 HTF_INTERVAL: str = "1d"
 LTF_INTERVAL: str = "1h"
 
+#: Every kline interval Binance Spot accepts, in ascending-duration order. Used
+#: to validate ``--htf-interval`` / ``--ltf-interval``.
+BINANCE_INTERVALS: tuple[str, ...] = (
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "8h",
+    "12h",
+    "1d",
+    "3d",
+    "1w",
+    "1M",
+)
+
+#: Human-readable label rendered in the prompt for each Binance interval. Kept
+#: explicit (rather than a blanket ``.upper()``) so that minute intervals stay
+#: lowercase and cannot collide with the month interval ``1M``. The defaults
+#: reproduce the frozen labels ``Daily`` (for ``1d``) and ``1H`` (for ``1h``).
+INTERVAL_LABELS: dict[str, str] = {
+    "1m": "1m",
+    "3m": "3m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "1H",
+    "2h": "2H",
+    "4h": "4H",
+    "6h": "6H",
+    "8h": "8H",
+    "12h": "12H",
+    "1d": "Daily",
+    "3d": "3D",
+    "1w": "1W",
+    "1M": "1M",
+}
+
+
+def validate_interval(value: str, *, flag: str = "--htf-interval") -> str:
+    """Return ``value`` when it is a valid Binance interval, else raise.
+
+    Raises :class:`~smc_prompt.errors.ConfigError` (exit 2) listing the full
+    allowed set so the message is self-documenting.
+    """
+
+    if value not in BINANCE_INTERVALS:
+        raise ConfigError(
+            f"{flag} must be one of: " + ", ".join(BINANCE_INTERVALS) + "."
+        )
+    return value
+
+
+def interval_label(interval: str) -> str:
+    """Return the prompt label for a Binance interval (falls back to verbatim)."""
+
+    return INTERVAL_LABELS.get(interval, interval)
+
 KLINES_PATH: str = "/api/v3/klines"
 TICKER_PRICE_PATH: str = "/api/v3/ticker/price"
 EXCHANGE_INFO_PATH: str = "/api/v3/exchangeInfo"
+#: Binance server time (``GET /api/v3/time``). Preferring the exchange clock
+#: over the host clock keeps ``is_closed`` and ``GENERATED_AT_UTC`` immune to a
+#: skewed local clock. See ``data_fetcher.fetch_server_time``.
+TIME_PATH: str = "/api/v3/time"
 
 # --------------------------------------------------------------------------
 # Base URL fallback list (orchestrator decision, see brief §3 notes)
@@ -47,6 +113,20 @@ DEFAULT_SWING_MERGE_ATR_MULT: Decimal = Decimal("0.5")
 DEFAULT_ATR_PERIOD: int = 14
 DEFAULT_STRUCTURE_MIN_SWINGS: int = 4
 DEFAULT_STRUCTURE_LAST_SWINGS: int = 6
+#: Rows kept in the rendered swing-sequence table(s), oldest -> newest capped to
+#: the last N swings that are ACTUALLY rendered.
+DEFAULT_SWINGS_TABLE_ROWS: int = 12
+#: Tolerance for "equal" swing levels, expressed as a multiple of ATR(14). Used
+#: both for the Equal-Highs/Lows liquidity-pool facts and for the HH/HL/LH/LL vs
+#: EQH/EQL label derivation, so the two always agree.
+DEFAULT_EQUAL_LEVELS_ATR_MULT: Decimal = Decimal("0.1")
+#: Minimum Fair Value Gap size, expressed as a multiple of ATR(14). Gaps smaller
+#: than ``fvg_atr_mult × ATR`` are treated as sub-noise and discarded. Mirrors
+#: the equal-levels tolerance pattern (spec §4.7).
+DEFAULT_FVG_ATR_MULT: Decimal = Decimal("0.1")
+#: Number of newest Fair Value Gaps rendered per timeframe table (oldest -> newest
+#: within the emitted window).
+DEFAULT_FVG_TABLE_ROWS: int = 8
 DEFAULT_CONTEXT_BUFFER: int = 50
 FETCH_LIMIT_MAX: int = 1000
 DEFAULT_REQUEST_TIMEOUT: float = 10.0
@@ -55,6 +135,20 @@ DEFAULT_RETRY_BACKOFF_BASE: float = 1.0
 DEFAULT_RETRY_BACKOFF_FACTOR: float = 2.0
 DEFAULT_OUTPUT_DIR: str = "output"
 DEFAULT_DELISTED_ZERO_VOLUME_STREAK: int = 3
+
+#: Relative-volume lookback (candles) for the volume-spike fact (Phase 5, #16).
+#: ``relative_volume = last / mean(last N volumes)``.
+DEFAULT_VOLUME_MEAN_PERIOD: int = 20
+#: A candle's volume is flagged as a spike when
+#: ``relative_volume >= volume_spike_mult`` (Phase 5, #16).
+DEFAULT_VOLUME_SPIKE_MULT: Decimal = Decimal("1.5")
+
+#: Post-render size warning threshold in UTF-8 bytes (Phase 5, #11). Crossing
+#: this emits a non-fatal WARN with the byte and approximate token count.
+PROMPT_BYTES_WARN: int = 120_000
+#: Rough bytes-per-token divisor used only for the informational token estimate
+#: in the prompt-size warning; it never affects the rendered bytes.
+PROMPT_BYTES_PER_TOKEN: int = 4
 
 MIN_CANDLES: int = 10
 MIN_SWING_LOOKBACK: int = 3
@@ -72,6 +166,10 @@ DISTANCE_REFERENCES: tuple[str, ...] = (
 # --------------------------------------------------------------------------
 
 
+#: Highest precision Binance ever expresses (tickSize strings carry 8 dp).
+MAX_PRICE_DECIMALS: int = 8
+
+
 def price_decimals(value: Decimal | float | int | str) -> int:
     """Decimals chosen by magnitude: >=1000 -> 2dp, >=1 -> 4dp, else 8dp."""
 
@@ -81,6 +179,32 @@ def price_decimals(value: Decimal | float | int | str) -> int:
     if magnitude >= Decimal("1"):
         return 4
     return 8
+
+
+def decimals_from_tick_size(
+    tick_size: Decimal | float | int | str | None,
+) -> int | None:
+    """Derive the number of price decimals from a Binance ``tickSize``.
+
+    ``PRICE_FILTER.tickSize`` arrives as a decimal string such as
+    ``0.01000000`` (-> 2), ``0.00000100`` (-> 6) or ``1.00000000`` (-> 0). The
+    trailing zeros are ignored by normalizing the value first. Returns ``None``
+    when the tick is absent/unparseable or non-positive, so callers fall back to
+    the documented magnitude-bucketed :func:`price_decimals` rule.
+    """
+
+    if tick_size is None:
+        return None
+    try:
+        tick = Decimal(str(tick_size))
+    except (InvalidOperation, ValueError):
+        return None
+    if not tick.is_finite() or tick <= 0:
+        return None
+    exponent = tick.normalize().as_tuple().exponent
+    if not isinstance(exponent, int) or exponent >= 0:
+        return 0
+    return min(-exponent, MAX_PRICE_DECIMALS)
 
 
 def fmt_price(value: Decimal | float | int | str) -> str:
@@ -119,6 +243,106 @@ def fmt_distance(current: Decimal, reference: Decimal) -> str:
     return f"{sign}{abs(pct):.2f}% ({sign}{abs(abs_val):.{dp}f})"
 
 
+@dataclass(frozen=True)
+class PriceFormat:
+    """Price rendering bound to the symbol's tick size (spec §8.1).
+
+    ``tick_decimals`` is derived from Binance ``PRICE_FILTER.tickSize`` via
+    :func:`decimals_from_tick_size`. When it is ``None`` (tick unknown, e.g.
+    ``exchangeInfo`` unavailable) formatting falls back to the documented
+    magnitude-bucketed :func:`price_decimals` rule. Both paths are fully
+    deterministic; for the frozen BTCUSDT sample the tick-derived precision
+    (2 dp) equals the magnitude rule for every rendered value, so the artifact
+    is byte-identical.
+    """
+
+    tick_decimals: int | None = None
+
+    def decimals(self, value: Decimal | float | int | str) -> int:
+        """Decimals for ``value``: tick-derived when known, else magnitude."""
+
+        if self.tick_decimals is not None:
+            return self.tick_decimals
+        return price_decimals(value)
+
+    def fmt(self, value: Decimal | float | int | str) -> str:
+        """Render ``value`` at this format's precision."""
+
+        dec = Decimal(str(value))
+        return f"{dec:.{self.decimals(dec)}f}"
+
+    def fmt_distance(self, current: Decimal, reference: Decimal) -> str:
+        """Render signed distance using this format's precision."""
+
+        abs_val = Decimal(current) - Decimal(reference)
+        pct = (abs_val / Decimal(reference)) * Decimal("100")
+        sign = "+" if abs_val >= 0 else "-"
+        dp = self.decimals(reference)
+        return f"{sign}{abs(pct):.2f}% ({sign}{abs(abs_val):.{dp}f})"
+
+
+def fmt_ratio(value: Decimal | float | int | str) -> str:
+    """Render a plain multiplier (e.g. ``0.1``) for prose (byte-stable).
+
+    Uses ``format(Decimal(...), "f")`` so ``Decimal("0.1")`` renders as ``0.1``
+    rather than the magnitude-based ``fmt_price`` form ``0.10000000``.
+    """
+
+    return format(Decimal(str(value)), "f")
+
+
+def fmt_volume(value: Decimal | float | int | str) -> str:
+    """Render a raw-candle volume deterministically (byte-stable).
+
+    Rule: plain ``str(Decimal)`` of the value exactly as carried by the
+    :class:`~smc_prompt.models.Candle`. Binance klines deliver volume as a JSON
+    string, so ``Decimal(str(value))`` reproduces that literal digit sequence
+    without float rounding or magnitude-dependent formatting — the cheapest and
+    most reproducible column format. No thousands separators, no trailing
+    zeros are added or removed (the source already fixed them).
+    """
+
+    return format(Decimal(str(value)), "f")
+
+
+def fmt_relative_volume(value: Decimal | float | int | str) -> str:
+    """Render a relative-volume ratio (Phase 5, #16) as a plain ``xN.NN``.
+
+    Always 2 dp with a lowercase ``x`` prefix, e.g. ``x1.25``. Uses
+    ``format(Decimal, "f")`` so no scientific notation can ever appear and the
+    output is byte-stable.
+    """
+
+    return "x" + format(Decimal(str(value)).quantize(Decimal("0.01")), "f")
+
+
+def fmt_atr_pct(atr: Decimal, price: Decimal) -> str:
+    """Render ``ATR`` as a percent of ``price`` (Phase 5, #6), 2 dp.
+
+    Result shape is ``2.87% of price``. Callers must guard against a
+    non-positive price before calling (division by zero).
+    """
+
+    pct = (Decimal(atr) / Decimal(price)) * Decimal("100")
+    return f"{abs(pct):.2f}% of price"
+
+
+def fmt_atr_distance(
+    current: Decimal, reference: Decimal, atr: Decimal
+) -> str:
+    """Render an ATR-normalized distance (Phase 5, #6), 2 dp, e.g. ``x1.25``.
+
+    ``|current - reference| / atr``. Callers must guard ``atr == 0`` before
+    calling (division by zero); :func:`build_payload` emits a ``0.00``-safe
+    ``x0.00`` in that case instead.
+    """
+
+    ratio = (
+        abs(Decimal(current) - Decimal(reference)) / Decimal(atr)
+    ).quantize(Decimal("0.01"))
+    return "x" + format(ratio, "f")
+
+
 def fmt_htf_date(moment: datetime) -> str:
     """HTF date format: ``%Y-%m-%d`` (UTC)."""
 
@@ -137,8 +361,8 @@ def fmt_generated_at(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def fmt_fallback_stamp(moment: datetime) -> str:
-    """Fallback filename stamp: ``%Y%m%dT%H%M%SZ``."""
+def fmt_output_stamp(moment: datetime) -> str:
+    """Output filename stamp: ``%Y%m%dT%H%M%SZ``."""
 
     return moment.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -166,6 +390,10 @@ class Config:
     atr_period: int = DEFAULT_ATR_PERIOD
     structure_min_swings: int = DEFAULT_STRUCTURE_MIN_SWINGS
     structure_last_swings: int = DEFAULT_STRUCTURE_LAST_SWINGS
+    swings_table_rows: int = DEFAULT_SWINGS_TABLE_ROWS
+    equal_levels_atr_mult: Decimal = DEFAULT_EQUAL_LEVELS_ATR_MULT
+    fvg_atr_mult: Decimal = DEFAULT_FVG_ATR_MULT
+    fvg_table_rows: int = DEFAULT_FVG_TABLE_ROWS
     context_buffer: int = DEFAULT_CONTEXT_BUFFER
     fetch_limit_max: int = FETCH_LIMIT_MAX
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
@@ -175,7 +403,22 @@ class Config:
     output_dir: str = DEFAULT_OUTPUT_DIR
     delisted_zero_volume_streak: int = DEFAULT_DELISTED_ZERO_VOLUME_STREAK
 
+    #: Relative-volume window / spike threshold (Phase 5, #16).
+    volume_mean_period: int = DEFAULT_VOLUME_MEAN_PERIOD
+    volume_spike_mult: Decimal = DEFAULT_VOLUME_SPIKE_MULT
+
+    #: Post-render size warning threshold in bytes; ``None`` disables it
+    #: (Phase 5, #11).
+    prompt_bytes_warn: int | None = PROMPT_BYTES_WARN
+    #: Optional hard post-render size limit in bytes; raising against it is a
+    #: `ConfigError` (Phase 5, #11). ``None`` disables the hard limit.
+    max_prompt_bytes: int | None = None
+
     base_urls: tuple[str, ...] = field(default=DEFAULT_BASE_URLS)
+    #: Tick-size-derived price formatter. Starts as the magnitude fallback and
+    #: is re-bound by ``cli`` (via ``dataclasses.replace``) once ``exchangeInfo``
+    #: has been parsed.
+    price_format: PriceFormat = field(default_factory=PriceFormat)
 
     @property
     def htf_fetch_limit(self) -> int:
@@ -189,6 +432,18 @@ class Config:
 
         return min(self.ltf_candles + self.context_buffer, self.fetch_limit_max)
 
+    @property
+    def htf_interval_label(self) -> str:
+        """Prompt label for :attr:`htf_interval` (e.g. ``1d`` -> ``Daily``)."""
+
+        return interval_label(self.htf_interval)
+
+    @property
+    def ltf_interval_label(self) -> str:
+        """Prompt label for :attr:`ltf_interval` (e.g. ``1h`` -> ``1H``)."""
+
+        return interval_label(self.ltf_interval)
+
 
 def build_config(
     symbol: str,
@@ -198,8 +453,15 @@ def build_config(
     swing_lookback: int = DEFAULT_SWING_LOOKBACK,
     distance_reference: str = DISTANCE_REFERENCE_NEAREST,
     include_atr: bool = True,
+    htf_interval: str = HTF_INTERVAL,
+    ltf_interval: str = LTF_INTERVAL,
     output_dir: str = DEFAULT_OUTPUT_DIR,
+    volume_mean_period: int = DEFAULT_VOLUME_MEAN_PERIOD,
+    volume_spike_mult: Decimal = DEFAULT_VOLUME_SPIKE_MULT,
+    prompt_bytes_warn: int | None = PROMPT_BYTES_WARN,
+    max_prompt_bytes: int | None = None,
     base_urls: Sequence[str] | None = None,
+    price_format: PriceFormat | None = None,
 ) -> Config:
     """Validate raw CLI arguments and build an immutable :class:`Config`.
 
@@ -228,6 +490,21 @@ def build_config(
             + "."
         )
 
+    validate_interval(htf_interval, flag="--htf-interval")
+    validate_interval(ltf_interval, flag="--ltf-interval")
+
+    if not isinstance(volume_mean_period, int) or volume_mean_period < 1:
+        raise ConfigError("volume_mean_period must be an integer >= 1.")
+    if Decimal(str(volume_spike_mult)) <= 0:
+        raise ConfigError("volume_spike_mult must be positive.")
+
+    if prompt_bytes_warn is not None:
+        if not isinstance(prompt_bytes_warn, int) or prompt_bytes_warn < 1:
+            raise ConfigError("prompt_bytes_warn must be a positive integer.")
+    if max_prompt_bytes is not None:
+        if not isinstance(max_prompt_bytes, int) or max_prompt_bytes < 1:
+            raise ConfigError("--max-prompt-bytes must be an integer >= 1.")
+
     hosts = tuple(base_urls) if base_urls else DEFAULT_BASE_URLS
     hosts = tuple(host.rstrip("/") for host in hosts if host and host.strip())
     if not hosts:
@@ -240,6 +517,13 @@ def build_config(
         swing_lookback=swing_lookback,
         distance_reference=distance_reference,
         include_atr=include_atr,
+        htf_interval=htf_interval,
+        ltf_interval=ltf_interval,
         output_dir=output_dir,
+        volume_mean_period=volume_mean_period,
+        volume_spike_mult=Decimal(str(volume_spike_mult)),
+        prompt_bytes_warn=prompt_bytes_warn,
+        max_prompt_bytes=max_prompt_bytes,
         base_urls=hosts,
+        price_format=price_format or PriceFormat(),
     )

@@ -17,6 +17,10 @@ dependencies = [
     "jinja2>=3.1.2",
 ]
 
+[project.optional-dependencies]
+# Dev/test extra: `pip install -e ".[dev]"` then run `pytest`.
+dev = ["pytest>=7.4.0"]
+
 [project.scripts]
 smc-prompt = "smc_prompt.cli:main"
 
@@ -25,3 +29,9 @@ packages = ["smc_prompt"]
 
 [tool.setuptools.package-data]
 smc_prompt = ["templates/*.j2"]
+
+[tool.pytest.ini_options]
+# The suite is network-free by design: the offline CSV source (#10) feeds the
+# golden render fixture and the network fetcher is never called without a mock.
+testpaths = ["tests"]
+addopts = "-q"

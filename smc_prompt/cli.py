@@ -8,21 +8,29 @@ from __future__ import annotations
 
 import sys
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import click
 
 from . import __version__, config as cfg
-from .data_fetcher import DataFetcher
+from .csv_source import LocalCsvSource
+from .data_fetcher import DataFetcher, price_sanity_warning
 from .errors import (
     ConfigError,
     DelistedWarning,
+    NetworkError,
     SmcPromptError,
+    SymbolStatusWarning,
     exit_code_for,
 )
 from .output import deliver
-from .structure_analyzer import analyze
+from .structure_analyzer import (
+    analyze,
+    compute_atr,
+    reference_sanity_warnings,
+)
 from .template_renderer import build_payload, render
 
 PROG = "smc-prompt"
@@ -33,8 +41,14 @@ class RunResult:
     """Summary of a completed run (used for diagnostics/tests)."""
 
     prompt: str
-    output_path: str | None
+    output_path: str
+    copied_to_clipboard: bool
+    printed_to_stdout: bool
     warnings: tuple[str, ...]
+    #: True when :func:`run` was invoked in ``--dry-run`` mode: config/symbol
+    #: were validated and resolved settings printed, but nothing was fetched,
+    #: rendered, or written.
+    dry_run: bool = False
 
 
 def _ensure_utf8_streams() -> None:
@@ -64,6 +78,117 @@ def _error(message: str) -> None:
     click.echo(f"[{PROG}] ERROR: {message}", err=True)
 
 
+def _resolve_input_files(
+    input_csv: str | None,
+    htf_file: str | None,
+    ltf_file: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve the offline CSV file pair (or ``(None, None)`` for the network).
+
+    Offline mode is enabled *only* by ``--input-csv`` so the default network path
+    is never switched implicitly. ``--htf-file`` / ``--ltf-file`` refine which CSV
+    feeds each timeframe; either may be omitted to fall back to ``--input-csv``.
+    """
+
+    if input_csv:
+        return htf_file or input_csv, ltf_file or input_csv
+    if htf_file or ltf_file:
+        raise ConfigError(
+            "--htf-file / --ltf-file require --input-csv as well; offline mode "
+            "is enabled explicitly so the default network path is never changed "
+            "implicitly."
+        )
+    return None, None
+
+
+def _extract_tick_size(entry: dict) -> str | None:
+    """Pull ``PRICE_FILTER.tickSize`` out of an exchangeInfo symbol entry.
+
+    Binance lists several filters per symbol; only ``PRICE_FILTER`` carries the
+    ``tickSize`` that defines the price precision. Returns ``None`` when absent
+    so the caller falls back to the magnitude-bucketed formatting rule.
+    """
+
+    filters = entry.get("filters") if isinstance(entry, dict) else None
+    if not isinstance(filters, list):
+        return None
+    for item in filters:
+        if isinstance(item, dict) and item.get("filterType") == "PRICE_FILTER":
+            tick = item.get("tickSize")
+            return str(tick) if tick is not None else None
+    return None
+
+
+def _print_resolved_settings(
+    config: cfg.Config,
+    *,
+    offline_mode: bool,
+    htf_file: str | None,
+    ltf_file: str | None,
+    print_stdout: bool,
+    max_prompt_bytes: int | None,
+) -> None:
+    """Print the resolved run settings for ``--dry-run`` (Phase 5, #16).
+
+    No network, no klines, and no file write happen on this path: it exists for
+    CI/pre-flight validation. All output goes to stderr so stdout stays empty
+    unless ``--stdout`` is also given.
+    """
+
+    source = "offline CSV" if offline_mode else "Binance network"
+    if offline_mode:
+        source = f"{source} (HTF={htf_file}, LTF={ltf_file})"
+    lines = [
+        f"[{PROG}] DRY RUN — no file written, no klines fetched.",
+        f"[{PROG}] symbol={config.symbol}",
+        f"[{PROG}] data source={source}",
+        f"[{PROG}] htf_interval={config.htf_interval} "
+        f"({config.htf_interval_label}) ltf_interval={config.ltf_interval} "
+        f"({config.ltf_interval_label})",
+        f"[{PROG}] htf_candles={config.htf_candles} "
+        f"ltf_candles={config.ltf_candles} "
+        f"swing_lookback={config.swing_lookback}",
+        f"[{PROG}] distance_reference={config.distance_reference} "
+        f"include_atr={config.include_atr}",
+        f"[{PROG}] htf_fetch_limit={config.htf_fetch_limit} "
+        f"ltf_fetch_limit={config.ltf_fetch_limit}",
+        f"[{PROG}] output_dir={config.output_dir} stdout={print_stdout}",
+        f"[{PROG}] volume_mean_period={config.volume_mean_period} "
+        f"volume_spike_mult={cfg.fmt_ratio(config.volume_spike_mult)}",
+        f"[{PROG}] prompt_bytes_warn={config.prompt_bytes_warn} "
+        f"max_prompt_bytes={max_prompt_bytes}",
+    ]
+    for line in lines:
+        click.echo(line, err=True)
+
+
+def _prompt_size_notes(text: str, config: cfg.Config) -> list[str]:
+    """Post-render prompt-size guard (Phase 5, #11).
+
+    Raises :class:`ConfigError` when an explicit ``--max-prompt-bytes`` hard
+    limit is exceeded; otherwise returns a WARN string (with the byte and
+    approximate token count) when the configurable warning threshold is
+    crossed, or an empty list.
+    """
+
+    size = len(text.encode("utf-8"))
+    if config.max_prompt_bytes is not None and size > config.max_prompt_bytes:
+        raise ConfigError(
+            f"Rendered prompt is {size} bytes, exceeding --max-prompt-bytes "
+            f"({config.max_prompt_bytes}). Reduce --htf-candles/--ltf-candles "
+            f"or raise the limit."
+        )
+
+    notes: list[str] = []
+    if config.prompt_bytes_warn is not None and size > config.prompt_bytes_warn:
+        approx_tokens = size // cfg.PROMPT_BYTES_PER_TOKEN
+        notes.append(
+            f"Rendered prompt is {size} bytes (~{approx_tokens} tokens), above "
+            f"the {config.prompt_bytes_warn}-byte warning threshold."
+        )
+    return notes
+
+
 def run(
     symbol: str,
     *,
@@ -73,8 +198,15 @@ def run(
     distance_reference: str,
     include_atr: bool,
     output_dir: str,
+    htf_interval: str = cfg.HTF_INTERVAL,
+    ltf_interval: str = cfg.LTF_INTERVAL,
+    print_stdout: bool = False,
     base_urls: tuple[str, ...] | None = None,
-    debug: bool = False,
+    input_csv: str | None = None,
+    htf_file: str | None = None,
+    ltf_file: str | None = None,
+    max_prompt_bytes: int | None = None,
+    dry_run: bool = False,
 ) -> RunResult:
     """Chain fetch -> analyze -> render -> output. Raises on any failure."""
 
@@ -85,18 +217,100 @@ def run(
         swing_lookback=swing_lookback,
         distance_reference=distance_reference,
         include_atr=include_atr,
+        htf_interval=htf_interval,
+        ltf_interval=ltf_interval,
         output_dir=output_dir,
+        max_prompt_bytes=max_prompt_bytes,
         base_urls=base_urls,
     )
 
-    warnings: list[str] = []
-    fetcher = DataFetcher(config)
+    offline_htf, offline_ltf = _resolve_input_files(input_csv, htf_file, ltf_file)
+    offline_mode = offline_htf is not None and offline_ltf is not None
 
-    fetcher.validate_symbol()
+    # --dry-run (Phase 5, #16): validate config + resolve the data source and
+    # print the resolved settings, then exit WITHOUT fetching klines or writing
+    # a file. Useful for CI / pre-flight checks.
+    if dry_run:
+        _print_resolved_settings(
+            config,
+            offline_mode=offline_mode,
+            htf_file=offline_htf,
+            ltf_file=offline_ltf,
+            print_stdout=print_stdout,
+            max_prompt_bytes=max_prompt_bytes,
+        )
+        return RunResult("", "", False, False, (), dry_run=True)
+
+    warnings: list[str] = []
+    # Data source selection: the network fetcher remains the DEFAULT. The local
+    # CSV source is an additive, network-free path (Phase 4, #10) that exposes
+    # the same interface, so the analysis pipeline below is untouched.
+    fetcher: DataFetcher | LocalCsvSource
+    if offline_mode:
+        fetcher = LocalCsvSource(
+            config, htf_file=offline_htf, ltf_file=offline_ltf
+        )
+    else:
+        fetcher = DataFetcher(config)
+
+    # exchangeInfo is fetched once: it validates the symbol, yields the
+    # PRICE_FILTER.tickSize for tick-precise price rendering (#9) and carries
+    # the listing status surfaced as a non-TRADING warning (#9/#14).
+    symbol_entry = fetcher.validate_symbol()
+
+    tick_size = _extract_tick_size(symbol_entry)
+    config = replace(
+        config,
+        price_format=cfg.PriceFormat(cfg.decimals_from_tick_size(tick_size)),
+    )
+
+    status = symbol_entry.get("status")
+    if isinstance(status, str) and status and status != "TRADING":
+        warnings.append(SymbolStatusWarning(config.symbol, status).message())
+
+    # Prefer Binance server time over the host clock for the closure decision
+    # so a skewed local clock cannot inject a half-open candle (#8). The fetcher
+    # exposes an injectable ``now`` seam; rebind it to the fixed server instant.
+    server_time: datetime | None = None
+    if offline_mode:
+        # Offline mode derives ``now`` from the CSV (max close_time + 1s), so
+        # GENERATED_AT_UTC is a deterministic function of the input file and no
+        # host clock / network is consulted.
+        server_time = fetcher.fetch_server_time()
+    else:
+        try:
+            server_time = fetcher.fetch_server_time()
+        except NetworkError as exc:
+            _warn(
+                f"Binance server time unavailable ({exc}); falling back to the "
+                f"host clock for candle-closure and GENERATED_AT_UTC."
+            )
+    if server_time is not None:
+        fetcher = fetcher.with_now(server_time)
+
     htf_raw = fetcher.fetch_klines(config.htf_interval, config.htf_fetch_limit)
     ltf_raw = fetcher.fetch_klines(config.ltf_interval, config.ltf_fetch_limit)
-    current_price = fetcher.fetch_current_price()
-    generated_at = datetime.now(timezone.utc)
+
+    # Current-price sanity (#13): cross-check the ticker against the last closed
+    # LTF candle's [low, high] ± 1 × LTF ATR. The tolerance uses the same ATR
+    # driving the swing filter, so no extra indicator is introduced.
+    ltf_closed = [candle for candle in ltf_raw if candle.is_closed]
+    ltf_atr: Decimal | None = None
+    if len(ltf_closed) >= config.atr_period + 1:
+        ltf_atr = compute_atr(ltf_closed, config.atr_period)
+    reference_candle = ltf_closed[-1] if ltf_closed else None
+
+    current_price = fetcher.fetch_current_price(
+        reference_candle=reference_candle, tolerance=ltf_atr
+    )
+    warnings.extend(fetcher.price_notes)
+    price_warning = price_sanity_warning(
+        current_price, reference_candle, ltf_atr, symbol=config.symbol
+    )
+    if price_warning is not None:
+        warnings.append(price_warning)
+
+    generated_at = server_time or datetime.now(timezone.utc)
 
     htf_result, htf_table, htf_stats = analyze(
         htf_raw,
@@ -134,6 +348,11 @@ def run(
                 ).message()
             )
 
+    # Mechanical reference/structure contradictions (deterministic; empty when
+    # consistent). Non-fatal: the prompt is still rendered with the raw facts.
+    warnings.extend(reference_sanity_warnings(htf_result, config))
+    warnings.extend(reference_sanity_warnings(ltf_result, config))
+
     for message in warnings:
         _warn(message)
 
@@ -149,7 +368,14 @@ def run(
     )
     rendered = render(payload, include_atr=config.include_atr)
 
-    click.echo(rendered.text, nl=False)
+    # Post-render size guard (Phase 5, #11): the hard limit raises ConfigError
+    # (exit 2) before anything is written; the soft threshold only WARNs.
+    size_notes = _prompt_size_notes(rendered.text, config)
+    for note in size_notes:
+        _warn(note)
+
+    if print_stdout:
+        click.echo(rendered.text, nl=False)
 
     result = deliver(
         rendered.text,
@@ -157,17 +383,20 @@ def run(
         output_dir=config.output_dir,
         moment=generated_at,
     )
-    output_path: str | None = None
-    if result.used_fallback:
-        output_path = str(result.fallback_path)
-        _warn(
-            f"Clipboard unavailable ({result.clipboard_error}). "
-            f"Wrote prompt to {output_path} instead."
-        )
+    output_path = str(result.output_path)
+    click.echo(f"[{PROG}] Prompt written to {output_path}.", err=True)
+    if result.clipboard_warning:
+        _warn(result.clipboard_warning)
     else:
         click.echo(f"[{PROG}] Prompt copied to clipboard.", err=True)
 
-    return RunResult(rendered.text, output_path, tuple(warnings))
+    return RunResult(
+        rendered.text,
+        output_path,
+        result.copied_to_clipboard,
+        print_stdout,
+        tuple(warnings),
+    )
 
 
 @click.command(
@@ -184,14 +413,34 @@ def run(
     type=int,
     default=cfg.DEFAULT_HTF_CANDLES,
     show_default=True,
-    help="Number of CLOSED daily candles in the HTF raw table (>= 10).",
+    help="Number of CLOSED HTF-interval candles in the HTF raw table (>= 10).",
 )
 @click.option(
     "--ltf-candles",
     type=int,
     default=cfg.DEFAULT_LTF_CANDLES,
     show_default=True,
-    help="Number of CLOSED hourly candles in the LTF raw table (>= 10).",
+    help="Number of CLOSED LTF-interval candles in the LTF raw table (>= 10).",
+)
+@click.option(
+    "--htf-interval",
+    type=str,
+    default=cfg.HTF_INTERVAL,
+    show_default=True,
+    help=(
+        "Binance kline interval for the HTF series (e.g. 1d, 4h). "
+        "Allowed: " + ", ".join(cfg.BINANCE_INTERVALS) + "."
+    ),
+)
+@click.option(
+    "--ltf-interval",
+    type=str,
+    default=cfg.LTF_INTERVAL,
+    show_default=True,
+    help=(
+        "Binance kline interval for the LTF series (e.g. 1h, 15m). "
+        "Allowed: " + ", ".join(cfg.BINANCE_INTERVALS) + "."
+    ),
 )
 @click.option(
     "--swing-lookback",
@@ -229,7 +478,59 @@ def run(
     type=click.Path(file_okay=False),
     default=cfg.DEFAULT_OUTPUT_DIR,
     show_default=True,
-    help="Directory for the clipboard fallback file.",
+    help="Directory for the generated .md prompt file.",
+)
+@click.option(
+    "--stdout",
+    "print_stdout",
+    is_flag=True,
+    default=False,
+    help="Also print the prompt to stdout (off by default).",
+)
+@click.option(
+    "--input-csv",
+    "input_csv",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help=(
+        "Run fully OFFLINE from a local OHLCV CSV (columns: "
+        "open_time,open,high,low,close,volume). Feeds BOTH timeframes unless "
+        "overridden by --htf-file/--ltf-file. Network is the default."
+    ),
+)
+@click.option(
+    "--htf-file",
+    "htf_file",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Offline HTF candle CSV; requires --input-csv.",
+)
+@click.option(
+    "--ltf-file",
+    "ltf_file",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Offline LTF candle CSV; requires --input-csv.",
+)
+@click.option(
+    "--max-prompt-bytes",
+    "max_prompt_bytes",
+    type=int,
+    default=None,
+    help=(
+        "Hard post-render size limit in bytes; exceeding it aborts with "
+        "ConfigError (exit 2). Off by default."
+    ),
+)
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help=(
+        "Validate config + symbol and print the resolved settings, then exit "
+        "WITHOUT fetching klines or writing a file (CI/pre-flight)."
+    ),
 )
 @click.option("--debug", is_flag=True, default=False, help="Print stack traces.")
 @click.version_option(version=__version__, prog_name=PROG)
@@ -237,11 +538,19 @@ def main(
     symbol: str,
     htf_candles: int,
     ltf_candles: int,
+    htf_interval: str,
+    ltf_interval: str,
     swing_lookback: int,
     distance_reference: str,
     no_atr: bool,
     base_url: str | None,
     output_dir: str,
+    print_stdout: bool,
+    input_csv: str | None,
+    htf_file: str | None,
+    ltf_file: str | None,
+    max_prompt_bytes: int | None,
+    dry_run: bool,
     debug: bool,
 ) -> None:
     """CLI entrypoint. Parses args, then delegates to :func:`run`."""
@@ -260,12 +569,19 @@ def main(
             symbol,
             htf_candles=htf_candles,
             ltf_candles=ltf_candles,
+            htf_interval=htf_interval,
+            ltf_interval=ltf_interval,
             swing_lookback=swing_lookback,
             distance_reference=distance_reference,
             include_atr=not no_atr,
             output_dir=output_dir,
+            print_stdout=print_stdout,
             base_urls=base_urls,
-            debug=debug,
+            input_csv=input_csv,
+            htf_file=htf_file,
+            ltf_file=ltf_file,
+            max_prompt_bytes=max_prompt_bytes,
+            dry_run=dry_run,
         )
     except SmcPromptError as exc:
         _error(str(exc))
