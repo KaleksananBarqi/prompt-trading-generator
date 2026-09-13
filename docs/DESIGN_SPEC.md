@@ -19,7 +19,7 @@ The tool is a **data-preparation utility for a downstream text LLM**. It perform
 Swing extremes alone are **insufficient** for the template's section 4 (CHoCH / MSS / FVG / OB), because those patterns require the raw candle sequence, not just the extremes. Therefore the injected payload has **two layers**:
 
 - **Layer A — Computed Summary:** current price, swing extremes (price + timestamp), mechanical structure classification, distance metrics, optional ATR(14), and **mechanical Fair Value Gaps** (3-candle price gaps + fill status — see §4.7).
-- **Layer B — Raw Candle Table:** compact, token-efficient CSV blocks (HTF daily and LTF hourly) so the LLM can derive OB and CHoCH/MSS (several prior swings) itself. FVG is now computed in Layer A (§4.7) rather than delegated here; the LLM may still cross-check it against the raw table.
+- **Layer B — Raw Candle Table:** compact, token-efficient CSV blocks (HTF, MTF and LTF — default trio `1d` / `4h` / `1h`) so the LLM can derive OB and CHoCH/MSS (several prior swings) itself. FVG is now computed in Layer A (§4.7) rather than delegated here; the LLM may still cross-check it against the raw table.
 
 ---
 
@@ -53,14 +53,20 @@ These are absolute scope boundaries. Any implementation that crosses one is a de
 3. No module may import an LLM SDK, an image library (PIL/OpenCV), or an exchange trading client (spot/margin order APIs).
 4. `data_fetcher.py` may only call **read-only public market-data endpoints** (klines, ticker/price, exchangeInfo). No signed/private endpoints.
 
+> **Note (3-tier extension).** Extending the pipeline from two native tiers
+> (HTF + LTF) to three (HTF + MTF + LTF) **alters no non-goal** in this section.
+> The MTF tier emits the same mechanical `[FAKTA]` family as HTF/LTF; the tool
+> still performs zero reasoning, still never names `structure_class` as "bias",
+> and FVG remains the only structural pattern promoted to Layer A.
+
 ---
 
 ## 3. Invocation & CLI Contract
 
 ```
-smc-prompt <SYMBOL> [--htf-interval I] [--ltf-interval I]
-           [--htf-candles N] [--ltf-candles N] [--swing-lookback N]
-           [--input-csv FILE] [--htf-file FILE] [--ltf-file FILE]
+smc-prompt <SYMBOL> [--htf-interval I] [--mtf-interval I] [--ltf-interval I]
+           [--htf-candles N] [--mtf-candles N] [--ltf-candles N] [--swing-lookback N]
+           [--input-csv FILE] [--htf-file FILE] [--mtf-file FILE] [--ltf-file FILE]
            [--max-prompt-bytes BYTES] [--dry-run]
 ```
 
@@ -68,23 +74,26 @@ Examples:
 
 ```
 smc-prompt BTCUSDT
-smc-prompt ETHUSDT --htf-candles 60 --ltf-candles 100
-smc-prompt BTCUSDT --htf-interval 4h --ltf-interval 15m
-smc-prompt BTCUSDT --input-csv candles_1d.csv --ltf-file candles_1h.csv
+smc-prompt ETHUSDT --htf-candles 60 --mtf-candles 120 --ltf-candles 100
+smc-prompt BTCUSDT --htf-interval 1d --mtf-interval 4h --ltf-interval 1h
+smc-prompt BTCUSDT --input-csv candles.csv --mtf-file candles_4h.csv --ltf-file candles_1h.csv
 ```
 
 | Argument | Required | Type | Default | Description |
 |---|---|---|---|---|
 | `SYMBOL` | yes | positional str | — | Binance Spot symbol, e.g. `BTCUSDT` (case-insensitive; normalized to uppercase) |
 | `--htf-interval` | no | Binance interval | `1d` | Kline interval for the HTF series. One of `1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M` (see §11) |
-| `--ltf-interval` | no | Binance interval | `1h` | Kline interval for the LTF series. Same allowed set as `--htf-interval` |
+| `--mtf-interval` | no | Binance interval | `4h` | Kline interval for the MTF (medium) series. Same allowed set as `--htf-interval`. Must differ from the other two tiers |
+| `--ltf-interval` | no | Binance interval | `1h` | Kline interval for the LTF series. Same allowed set as `--htf-interval`. Must differ from the other two tiers |
 | `--htf-candles` | no | int >= 10 | `60` | Number of CLOSED `htf_interval` candles emitted in the HTF raw table |
+| `--mtf-candles` | no | int >= 10 | `120` | Number of CLOSED `mtf_interval` candles emitted in the MTF raw table |
 | `--ltf-candles` | no | int >= 10 | `100` | Number of CLOSED `ltf_interval` candles emitted in the LTF raw table |
 | `--swing-lookback` | no | int (odd, >= 3) | `5` | Fractal window size in bars used for swing detection (see §6.2) |
 | `--output-dir` | no | path | `./output` | Directory for the generated `.md` prompt file |
 | `--stdout` | no | flag | off | Also print the prompt to stdout (off by default) |
-| `--input-csv` | no | path | — | **Offline mode (Phase 4, #10).** Read local OHLCV candles from a CSV instead of Binance. Feeds BOTH timeframes unless overridden by `--htf-file` / `--ltf-file`. The network path stays the default; offline mode is enabled ONLY when this flag is present (see §4.8). |
+| `--input-csv` | no | path | — | **Offline mode (Phase 4, #10).** Read local OHLCV candles from a CSV instead of Binance. Feeds ALL THREE timeframes unless overridden by `--htf-file` / `--mtf-file` / `--ltf-file`. The network path stays the default; offline mode is enabled ONLY when this flag is present (see §4.8). |
 | `--htf-file` | no | path | — | Offline HTF candle CSV. Requires `--input-csv`; overrides the HTF series only. |
+| `--mtf-file` | no | path | — | Offline MTF candle CSV. Requires `--input-csv`; overrides the MTF series only. |
 | `--ltf-file` | no | path | — | Offline LTF candle CSV. Requires `--input-csv`; overrides the LTF series only. |
 | `--max-prompt-bytes` | no | int | — | **Hard post-render size limit (Phase 5, #11).** When the rendered prompt exceeds this many UTF-8 bytes the tool aborts with `ConfigError` (exit 2) **before** anything is written. Off by default. |
 | `--dry-run` | no | flag | off | **Dry run (Phase 5, #16).** Validate the config + symbol and print the resolved settings to stderr, then exit **without** fetching klines, rendering, or writing a file. Useful for CI / pre-flight checks. |
@@ -101,6 +110,7 @@ smc-prompt BTCUSDT --input-csv candles_1d.csv --ltf-file candles_1h.csv
 | Purpose | Endpoint | Interval/Param |
 |---|---|---|
 | HTF candles | `GET /api/v3/klines` | `interval=htf_interval` (default `1d`), `limit=htf_fetch_limit` |
+| MTF candles | `GET /api/v3/klines` | `interval=mtf_interval` (default `4h`), `limit=mtf_fetch_limit` |
 | LTF candles | `GET /api/v3/klines` | `interval=ltf_interval` (default `1h`), `limit=ltf_fetch_limit` |
 | Current price | `GET /api/v3/ticker/price` | `symbol=<SYMBOL>` |
 | Symbol validation (+ `tickSize`, `status`) | `GET /api/v3/exchangeInfo` | `symbol=<SYMBOL>` |
@@ -108,7 +118,7 @@ smc-prompt BTCUSDT --input-csv candles_1d.csv --ltf-file candles_1h.csv
 
 - No API key. Base host configurable (`https://api.binance.com`), with fallback documented in §11 (region blocks).
 - **Offline mode (Phase 4, #10).** Passing `--input-csv` (with optional
-  `--htf-file` / `--ltf-file`) switches the data source to the local
+  `--htf-file` / `--mtf-file` / `--ltf-file`) switches the data source to the local
   `smc_prompt/csv_source.py` reader and performs **zero network access**. See
   §4.8 for the schema and semantics. The fetcher (and thus the default network
   path) is unchanged.
@@ -284,9 +294,10 @@ shape as `DataFetcher` (`validate_symbol` / `fetch_klines` /
 analysis pipeline is **not** changed: it already consumes `Sequence[Candle]`.
 
 **Activation.** Offline mode is enabled **only** by `--input-csv` (optionally
-refined by `--htf-file` / `--ltf-file`). The network path remains the default;
-`--htf-file`/`--ltf-file` without `--input-csv` raise `ConfigError` (exit 2).
-`--input-csv` alone feeds BOTH timeframes; each `*-file` overrides one series.
+refined by `--htf-file` / `--mtf-file` / `--ltf-file`). The network path remains
+the default; any `*-file` without `--input-csv` raises `ConfigError` (exit 2).
+`--input-csv` alone feeds ALL THREE timeframes; each `*-file` overrides one
+series.
 
 **CSV schema** (one file per timeframe, header row required):
 
@@ -309,17 +320,19 @@ sorted chronologically before analysis. Every row is treated as **already
 closed** (an offline snapshot *is* closed history), which keeps the offline
 render fully deterministic and independent of the host clock.
 
-**Determinism.** `fetch_server_time()` returns `max(close_time) + 1s` for the
-supplied files, so `GENERATED_AT_UTC` (and thus the output filename) is a pure
-function of the input data. `fetch_current_price()` returns the last *closed*
-LTF candle's close (no ticker endpoint offline). `validate_symbol()` returns a
-synthetic entry (`status="TRADING"`, no `PRICE_FILTER`), so the caller's
-tick-size/status handling degrades cleanly to the magnitude-bucketed price rule
-with no spurious warnings.
+**Determinism.** `fetch_server_time()` returns `max(close_time) + 1s` across the
+three supplied files, so `GENERATED_AT_UTC` (and thus the output filename) is a
+pure function of the input data. `fetch_current_price()` returns the last
+*closed* LTF candle's close (no ticker endpoint offline). `validate_symbol()`
+returns a synthetic entry (`status="TRADING"`, no `PRICE_FILTER`), so the
+caller's tick-size/status handling degrades cleanly to the magnitude-bucketed
+price rule with no spurious warnings.
 
-**Interval coupling.** Offline mode requires distinct `--htf-interval` and
-`--ltf-interval` (each CSV maps to exactly one timeframe); equal intervals raise
-`ConfigError` (exit 2).
+**Interval coupling.** Offline mode requires three DISTINCT intervals
+(`--htf-interval`, `--mtf-interval`, `--ltf-interval`), so each CSV maps to
+exactly one timeframe. This rule is enforced in `build_config` (both modes) and
+retained as a defense-in-depth guard in `LocalCsvSource.__init__`; a duplicate
+trio raises `ConfigError` (exit 2).
 
 **Malformed input.** A missing file, missing required column, empty body, or an
 unparseable timestamp/number raises `ConfigError` (exit 2) with the offending
@@ -647,26 +660,42 @@ status: <swept|untested>` where `<direction word>` ∈ `DI ATAS harga` /
 `DI BAWAH harga` / `DI HARGA SAAT INI`. Equal-level string shape:
 `<price> (<n> swings)` joined by `; ` in chronological order, or the literal `NONE`.
 
+**Three tiers (3-tier extension).** Layer A now carries the same computed-summary
+family for all THREE tiers in descending-timeframe order (HTF → MTF → LTF), i.e.
+the `HTF_*` block above is mirrored by an `MTF_*` block followed by the existing
+`LTF_*` block. The MTF tier is a third instance through the **unchanged**
+`analyze()` pipeline; `TimeframeAnalysis` is not modified. `MTF_SWING_*_DATE`
+strings use the **datetime** stamp (`%Y-%m-%d %H:%M`), like LTF, because MTF sits
+below the HTF tier.
+
+`ATR_PCT_OF_PRICE` remains a **single pair-level fact bound to the HTF ATR** (the
+macro volatility scale); no `MTF_ATR_PCT_OF_PRICE` / `LTF_ATR_PCT_OF_PRICE` is
+emitted. Per-tier volatility context is still available via `HTF_ATR14` /
+`MTF_ATR14` / `LTF_ATR14` and the per-tier ATR-normalized distances.
+
 ### 8.3 Layer B — Raw Candle Tables
 
-HTF format, exactly `HTF_CANDLE_COUNT` lines, one per closed daily candle, oldest → newest:
+The payload carries THREE raw candle tables, one per native tier:
+
+- HTF format, exactly `HTF_CANDLE_COUNT` lines, one per closed HTF candle,
+  oldest → newest (date stamp):
+- MTF format, exactly `MTF_CANDLE_COUNT` lines, one per closed MTF candle,
+  oldest → newest (datetime stamp):
+- LTF format, exactly `LTF_CANDLE_COUNT` lines, one per closed LTF candle,
+  oldest → newest (datetime stamp):
 
 ```
-YYYY-MM-DD,O,H,L,C,V
-```
-
-LTF format, exactly `LTF_CANDLE_COUNT` lines, one per closed hourly candle, oldest → newest:
-
-```
-YYYY-MM-DD HH:MM,O,H,L,C,V
+YYYY-MM-DD,O,H,L,C,V            (HTF)
+YYYY-MM-DD HH:MM,O,H,L,C,V      (MTF and LTF)
 ```
 
 No header, no index column, no ellipsis line. The `volume` column is appended
 after `close` using `fmt_volume`. Column order is documented by a one-line legend
-in the section prose (`Format kolom: tanggal,open,high,low,close,volume`) rather
-than a header row. If fewer closed candles exist than requested, the table is
-emitted at the reduced count and `*_CANDLE_COUNT` matches the actual count
-(see §9, edge case "insufficient history").
+in the section prose (`Format kolom: tanggal,...` for HTF, `Format kolom:
+datetime,...` for MTF and LTF) rather than a header row. If fewer closed candles
+exist than requested, the table is emitted at the reduced count and
+`*_CANDLE_COUNT` matches the actual count (see §9, edge case "insufficient
+history").
 
 **Fair Value Gap table (Layer A addition — Phase 2).** Emitted as a fenced block
 inside template §4 (the CHoCH/MSS confirmation section) for EACH timeframe,
@@ -790,6 +819,33 @@ DelistedWarning           (not an exception problem; a WARNING payload, exit 0)
 | `{{HTF_REF_LOW_NEAREST}}` | str | as HTF_REF_HIGH_RECENT | `62100.00 pada 2026-09-10 (DI BAWAH harga), status: swept` | `structure_analyzer` |
 | `{{HTF_REF_HIGH_WINDOW_MAX}}` | str | as HTF_REF_HIGH_RECENT | `68400.00 pada 2026-08-20 (DI ATAS harga), status: swept` | `structure_analyzer` |
 | `{{HTF_REF_LOW_WINDOW_MIN}}` | str | as HTF_REF_HIGH_RECENT | `58200.00 pada 2026-09-01 (DI BAWAH harga), status: untested` | `structure_analyzer` |
+| `{{MTF_STRUCTURE_CLASS}}` | str enum | as HTF | `Ranging/Mixed` | `structure_analyzer` |
+| `{{MTF_SWING_HIGH}}` | str(price) | `fmt_price` | `66400.00` | `structure_analyzer` |
+| `{{MTF_SWING_HIGH_DATE}}` | str(datetime) | `%Y-%m-%d %H:%M` (like LTF) | `2026-09-10 08:00` | `structure_analyzer` |
+| `{{MTF_DIST_TO_HIGH}}` | str | as HTF | `-7.72% (-5280.00)` | `structure_analyzer` |
+| `{{MTF_SWING_LOW}}` | str(price) | `fmt_price` | `60200.00` | `structure_analyzer` |
+| `{{MTF_SWING_LOW_DATE}}` | str(datetime) | `%Y-%m-%d %H:%M` | `2026-09-10 08:00` | `structure_analyzer` |
+| `{{MTF_DIST_TO_HIGH_ATR}}` | str | as HTF_DIST_TO_HIGH_ATR | `x2.85` | `template_renderer` |
+| `{{MTF_DIST_TO_LOW}}` | str | as HTF | `+8.45% (+4920.00)` | `structure_analyzer` |
+| `{{MTF_DIST_TO_LOW_ATR}}` | str | as HTF_DIST_TO_HIGH_ATR | `x2.66` | `template_renderer` |
+| `{{MTF_VOLUME_RELATIVE}}` | str | as HTF_VOLUME_RELATIVE | `x1.05` | `structure_analyzer` |
+| `{{MTF_VOLUME_SPIKE}}` | str enum | as HTF_VOLUME_SPIKE | `no` | `structure_analyzer` |
+| `{{MTF_ATR14}}` | str(price) | `fmt_atr` | `145.00` | `structure_analyzer` |
+| `{{MTF_INTERVAL_LABEL}}` | str | config label (e.g. `4H` for `4h`) | `4H` | `template_renderer` |
+| `{{MTF_CANDLE_COUNT}}` | int | decimal | `120` | `template_renderer` |
+| `{{MTF_CANDLE_TABLE_CSV}}` | str | newline-joined `D H:M,O,H,L,C,V` rows | see §8.3 | `template_renderer` |
+| `{{MTF_SWINGS_TABLE}}` | str | as HTF_SWINGS_TABLE (datetime stamp) | see §8.3 | `template_renderer` |
+| `{{MTF_EQUAL_HIGHS}}` | str | as HTF_EQUAL_HIGHS | `NONE` | `template_renderer` |
+| `{{MTF_EQUAL_LOWS}}` | str | as HTF_EQUAL_HIGHS | `NONE` | `template_renderer` |
+| `{{MTF_FVG_TABLE}}` | str | as HTF_FVG_TABLE (datetime stamp) | see §8.3 | `structure_analyzer` + `template_renderer` |
+| `{{MTF_FVG_COUNT}}` | int | decimal (`fvg_table_rows`) | `8` | `template_renderer` |
+| `{{MTF_FVG_ATR_MULT}}` | str | plain multiplier | `0.1` | `template_renderer` |
+| `{{MTF_REF_HIGH_RECENT}}` | str | as HTF_REF_HIGH_RECENT (datetime stamp) | `63450.00 pada 2026-09-10 08:00 (DI ATAS harga), status: untested` | `structure_analyzer` |
+| `{{MTF_REF_LOW_RECENT}}` | str | as MTF_REF_HIGH_RECENT | `62100.00 pada 2026-09-10 08:00 (DI BAWAH harga), status: swept` | `structure_analyzer` |
+| `{{MTF_REF_HIGH_NEAREST}}` | str | as MTF_REF_HIGH_RECENT | `63450.00 pada 2026-09-10 08:00 (DI ATAS harga), status: untested` | `structure_analyzer` |
+| `{{MTF_REF_LOW_NEAREST}}` | str | as MTF_REF_HIGH_RECENT | `62100.00 pada 2026-09-10 08:00 (DI BAWAH harga), status: swept` | `structure_analyzer` |
+| `{{MTF_REF_HIGH_WINDOW_MAX}}` | str | as MTF_REF_HIGH_RECENT | `68400.00 pada 2026-08-20 00:00 (DI ATAS harga), status: swept` | `structure_analyzer` |
+| `{{MTF_REF_LOW_WINDOW_MIN}}` | str | as MTF_REF_HIGH_RECENT | `58200.00 pada 2026-09-01 00:00 (DI BAWAH harga), status: untested` | `structure_analyzer` |
 | `{{LTF_STRUCTURE_CLASS}}` | str enum | as HTF | `Bearish` | `structure_analyzer` |
 | `{{LTF_SWING_HIGH}}` | str(price) | `fmt_price` | `63450.00` | `structure_analyzer` |
 | `{{LTF_SWING_HIGH_DATE}}` | str(datetime) | `%Y-%m-%d %H:%M` | `2026-09-12 14:00` | `structure_analyzer` |
@@ -827,8 +883,10 @@ If a placeholder has no computable value (only possible in a fatal-error path), 
 | Param | Default | Unit | CLI-exposed | Semantics |
 |---|---|---|---|---|
 | `htf_interval` | `1d` | — | yes (`--htf-interval`) | Binance kline interval for HTF; validated against `BINANCE_INTERVALS` |
+| `mtf_interval` | `4h` | — | yes (`--mtf-interval`) | Binance kline interval for MTF; validated against `BINANCE_INTERVALS` |
 | `ltf_interval` | `1h` | — | yes (`--ltf-interval`) | Binance kline interval for LTF; validated against `BINANCE_INTERVALS` |
 | `htf_candles` | `60` | candles | yes (`--htf-candles`) | Closed HTF-interval candles in HTF raw table |
+| `mtf_candles` | `120` | candles | yes (`--mtf-candles`) | Closed MTF-interval candles in MTF raw table |
 | `ltf_candles` | `100` | candles | yes (`--ltf-candles`) | Closed LTF-interval candles in LTF raw table |
 | `swing_lookback` | `5` | bars (odd) | yes (`--swing-lookback`) | Fractal window size `N` |
 | `swing_merge_atr_mult` | `0.5` | × ATR(14) | no | Min separation between same-type swings |
@@ -853,22 +911,26 @@ If a placeholder has no computable value (only possible in a fatal-error path), 
 | `output_dir` | `./output` | path | yes (`--output-dir`) | Directory for the generated `.md` prompt file |
 | `binance_base_url` | `https://api.binance.com` | URL | no | REST base (configurable; see risks) |
 
-Derived: `htf_fetch_limit = min(htf_candles + context_buffer, fetch_limit_max)`, same for LTF.
+Derived: `htf_fetch_limit = min(htf_candles + context_buffer, fetch_limit_max)`,
+`mtf_fetch_limit = min(mtf_candles + context_buffer, fetch_limit_max)`, same for
+LTF.
 
-**Allowed intervals (validated).** `--htf-interval` / `--ltf-interval` must be one
-of the Binance Spot kline intervals: `1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h,
-12h, 1d, 3d, 1w, 1M`. An out-of-set value raises `ConfigError` (exit 2) naming
-the flag and the full allowed list.
+**Allowed intervals (validated).** `--htf-interval` / `--mtf-interval` /
+`--ltf-interval` must each be one of the Binance Spot kline intervals: `1m, 3m,
+5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M`. An out-of-set value raises
+`ConfigError` (exit 2) naming the flag and the full allowed list. The three
+intervals must also be **distinct**; a duplicate trio raises `ConfigError`
+(exit 2) naming all three flags (see §4.8).
 
 **Interval labels in the prompt (config-driven).** The prose headers render the
 configured interval through a derivation table
-(`config.INTERVAL_LABELS` → `config.interval_label()` → `Config.htf_interval_label`
-/ `ltf_interval_label`) rather than a hardcoded literal, so the label always
+(`config.INTERVAL_LABELS` → `config.interval_label()` →
+`Config.htf_interval_label` / `Config.mtf_interval_label` /
+`ltf_interval_label`) rather than a hardcoded literal, so the label always
 matches the interval actually fetched. Mappings: `1d` → `Daily`, `1h` → `1H`,
 `4h` → `4H`, `15m` → `15m`, `12h` → `12H`, `1w` → `1W`, `1M` → `1M`, and so on
 (minute intervals stay lowercase; hour intervals are uppercased). With the
-defaults (`1d` / `1h`) the labels are `Daily` and `1H`, which reproduces the
-frozen rendered output byte-for-byte.
+defaults (`1d` / `4h` / `1h`) the labels are `Daily`, `4H` and `1H`.
 
 **Price precision (Phase 3).** `PRICE_FILTER.tickSize` is parsed into a decimal
 count (`config.decimals_from_tick_size`) and bound to a `config.PriceFormat`
@@ -886,9 +948,9 @@ byte-stable in both cases.
 
 ## 12. Concrete Rendered Example (deliverable 4 — byte-identical render target)
 
-Given: `PAIR=BTCUSDT`, `GENERATED_AT_UTC=2026-09-13T08:09:34Z`, values from §8.2, HTF table = 60 closed daily candles, LTF table = 100 closed hourly candles.
+Given: `PAIR=BTCUSDT`, `GENERATED_AT_UTC=2026-09-13T08:09:34Z`, values from §8.2, HTF table = 60 closed daily candles, MTF table = 120 closed 4H candles, LTF table = 100 closed hourly candles.
 
-> NOTE FOR CODE PHASE: the candle blocks below are **elided for brevity only**. The real output contains every row (exactly 60 HTF rows, exactly 100 LTF rows) with no `...` line. Every other character, including blank lines and fence markers, is exact.
+> NOTE FOR CODE PHASE: the candle blocks below are **elided for brevity only**. The real output contains every row (exactly 60 HTF rows, exactly 120 MTF rows, exactly 100 LTF rows) with no `...` line. Every other character, including blank lines and fence markers, is exact.
 
 ````markdown
 ## Peran
@@ -943,6 +1005,44 @@ Format kolom: tanggal,open,high,low,close,volume
 2026-09-12,63180.00,63260.00,62150.00,62540.00,16705.83256000
 ```
 
+### Ringkasan Data MTF (4H)
+- Current price: 63120.00
+- ATR ≈ 2.93% of price (ATR(14) HTF)
+- Klasifikasi struktur (mekanis): Ranging/Mixed
+- Swing high terdeteksi: 68400.00 pada 2026-09-10 08:00 (jarak dari current: -7.72% (-5280.00), x2.85×ATR(14))
+- Swing low terdeteksi: 58200.00 pada 2026-09-10 08:00 (jarak dari current: +8.45% (+4920.00), x2.66×ATR(14))
+- ATR(14): 145.00 (opsional)
+- Equal Highs (liquidity pool): NONE
+- Equal Lows (liquidity pool): NONE
+- Volume candle terakhir (relatif thd rata-rata N candle, spike bila ≥ ambang): x1.05, spike: no
+- Referensi HIGH terbaru (most-recent): 63450.00 pada 2026-09-10 08:00 (DI ATAS harga), status: untested
+- Referensi LOW terbaru (most-recent): 62100.00 pada 2026-09-10 08:00 (DI BAWAH harga), status: swept
+- Referensi HIGH terdekat (nearest): 63450.00 pada 2026-09-10 08:00 (DI ATAS harga), status: untested
+- Referensi LOW terdekat (nearest): 62100.00 pada 2026-09-10 08:00 (DI BAWAH harga), status: swept
+- Referensi HIGH ekstrem window: 68400.00 pada 2026-08-20 00:00 (DI ATAS harga), status: swept
+- Referensi LOW ekstrem window: 58200.00 pada 2026-09-01 00:00 (DI BAWAH harga), status: untested
+
+### Sequence Swing Terdeteksi MTF (4H, oldest→newest)
+Label: HH=Higher High, HL=Higher Low, LH=Lower High, LL=Lower Low, EQH=Equal High, EQL=Equal Low, '-'=swing pertama tipe tsb. Kolom: datetime,tipe,level,label.
+```
+2026-09-08 00:00,SWING_HIGH,64234.68,-
+2026-09-08 08:00,SWING_LOW,60755.00,-
+2026-09-09 04:00,SWING_HIGH,67292.15,HH
+2026-09-09 20:00,SWING_LOW,62272.07,HL
+2026-09-10 08:00,SWING_HIGH,65622.83,LH
+2026-09-10 12:00,SWING_LOW,57800.19,LL
+```
+
+### Data Candle Mentah MTF (4H, 120 candle terakhir, closed)
+Format kolom: datetime,open,high,low,close,volume
+```
+2026-09-07 00:00,62850.10,64120.00,62100.50,63890.00,18401.89741000
+2026-09-07 04:00,63890.00,65200.00,63500.00,64980.00,18764.52679000
+2026-09-07 08:00,64980.00,65990.00,64100.00,64420.00,18189.89389000
+2026-09-12 20:00,62980.00,63340.00,62650.00,63180.00,19098.58970000
+2026-09-13 00:00,63180.00,63260.00,62150.00,62540.00,16705.83256000
+```
+
 ### Ringkasan Data LTF (1H)
 - Klasifikasi struktur (mekanis): Bearish
 - Swing high terdeteksi: 63450.00 pada 2026-09-12 14:00 (jarak dari current: -0.52% (-330.00), x2.28×ATR(14))
@@ -994,10 +1094,11 @@ Hindari klaim absolut ("pasti", "dijamin", "akan"). Gunakan kalibrasi probabilit
 
 ---
 
-## 1. Multi-Timeframe Alignment (HTF & LTF)
+## 1. Multi-Timeframe Alignment (HTF, MTF & LTF)
 
 - **HTF Narrative:** Identifikasi tren makro dan _Draw on Liquidity_ (DOL) dari data HTF di atas. Ke arah mana target likuiditas besar berikutnya? [FAKTA + INFERENSI]
-- **LTF Context:** Evaluasi struktur LTF saat ini. Apakah selaras dengan narasi HTF, atau ini _inducement_? [INFERENSI]
+- **MTF Alignment:** Apakah struktur MTF mengonfirmasi atau bertentangan dengan narasi HTF? Apakah MTF adalah _dealing range_ tempat setup terbentuk? [FAKTA + INFERENSI]
+- **LTF Context:** Evaluasi struktur LTF saat ini. Apakah selaras dengan narasi HTF dan MTF, atau ini _inducement_? [INFERENSI]
 
 ## 2. Peta Jebakan Ritel (Retail Trap Mapping) — INI JANGKAR ANALISIS
 
@@ -1022,6 +1123,12 @@ Hindari klaim absolut ("pasti", "dijamin", "akan"). Gunakan kalibrasi probabilit
 ```
 2026-09-02,FVG_BULLISH,62100.00,62275.00,unfilled
 2026-09-03,FVG_BEARISH,76264.00,79500.00,filled
+```
+
+### FVG Mekanis MTF (4H, oldest→newest, terbaru maks. 8)
+[FAKTA] Fair Value Gap 3-candle murni mekanis: bullish bila low[i] > high[i-2] (range [high[i-2], low[i]]), bearish bila high[i] < low[i-2] (range [high[i], low[i-2]]); gap di bawah 0.1×ATR disaring. Kolom: datetime,tipe,lower,upper,status (filled bila candle setelahnya menembus penuh rentang).
+```
+2026-09-09 20:00,FVG_BULLISH,62272.07,62400.00,unfilled
 ```
 
 ### FVG Mekanis LTF (1H, oldest→newest, terbaru maks. 8)
@@ -1097,6 +1204,37 @@ Format kolom: tanggal,open,high,low,close,volume
 {{HTF_CANDLE_TABLE_CSV}}
 ```
 
+### Ringkasan Data MTF ({{MTF_INTERVAL_LABEL}})
+- Current price: {{CURRENT_PRICE}}
+- ATR ≈ {{ATR_PCT_OF_PRICE}} (ATR(14) HTF)
+- Klasifikasi struktur (mekanis): {{MTF_STRUCTURE_CLASS}}
+- Swing high terdeteksi: {{MTF_SWING_HIGH}} pada {{MTF_SWING_HIGH_DATE}} (jarak dari current: {{MTF_DIST_TO_HIGH}}, {{MTF_DIST_TO_HIGH_ATR}}×ATR(14))
+- Swing low terdeteksi: {{MTF_SWING_LOW}} pada {{MTF_SWING_LOW_DATE}} (jarak dari current: {{MTF_DIST_TO_LOW}}, {{MTF_DIST_TO_LOW_ATR}}×ATR(14))
+{% if INCLUDE_ATR %}
+- ATR(14): {{MTF_ATR14}} (opsional)
+{% endif %}
+- Equal Highs (liquidity pool): {{MTF_EQUAL_HIGHS}}
+- Equal Lows (liquidity pool): {{MTF_EQUAL_LOWS}}
+- Volume candle terakhir (relatif thd rata-rata N candle, spike bila ≥ ambang): {{MTF_VOLUME_RELATIVE}}, spike: {{MTF_VOLUME_SPIKE}}
+- Referensi HIGH terbaru (most-recent): {{MTF_REF_HIGH_RECENT}}
+- Referensi LOW terbaru (most-recent): {{MTF_REF_LOW_RECENT}}
+- Referensi HIGH terdekat (nearest): {{MTF_REF_HIGH_NEAREST}}
+- Referensi LOW terdekat (nearest): {{MTF_REF_LOW_NEAREST}}
+- Referensi HIGH ekstrem window: {{MTF_REF_HIGH_WINDOW_MAX}}
+- Referensi LOW ekstrem window: {{MTF_REF_LOW_WINDOW_MIN}}
+
+### Sequence Swing Terdeteksi MTF ({{MTF_INTERVAL_LABEL}}, oldest→newest)
+Label: HH=Higher High, HL=Higher Low, LH=Lower High, LL=Lower Low, EQH=Equal High, EQL=Equal Low, '-'=swing pertama tipe tsb. Kolom: datetime,tipe,level,label.
+```
+{{MTF_SWINGS_TABLE}}
+```
+
+### Data Candle Mentah MTF ({{MTF_INTERVAL_LABEL}}, {{MTF_CANDLE_COUNT}} candle terakhir, closed)
+Format kolom: datetime,open,high,low,close,volume
+```
+{{MTF_CANDLE_TABLE_CSV}}
+```
+
 ### Ringkasan Data LTF ({{LTF_INTERVAL_LABEL}})
 - Klasifikasi struktur (mekanis): {{LTF_STRUCTURE_CLASS}}
 - Swing high terdeteksi: {{LTF_SWING_HIGH}} pada {{LTF_SWING_HIGH_DATE}} (jarak dari current: {{LTF_DIST_TO_HIGH}}, {{LTF_DIST_TO_HIGH_ATR}}×ATR(14))
@@ -1138,10 +1276,11 @@ Hindari klaim absolut ("pasti", "dijamin", "akan"). Gunakan kalibrasi probabilit
 
 ---
 
-## 1. Multi-Timeframe Alignment (HTF & LTF)
+## 1. Multi-Timeframe Alignment (HTF, MTF & LTF)
 
 - **HTF Narrative:** Identifikasi tren makro dan _Draw on Liquidity_ (DOL) dari data HTF di atas. Ke arah mana target likuiditas besar berikutnya? [FAKTA + INFERENSI]
-- **LTF Context:** Evaluasi struktur LTF saat ini. Apakah selaras dengan narasi HTF, atau ini _inducement_? [INFERENSI]
+- **MTF Alignment:** Apakah struktur MTF mengonfirmasi atau bertentangan dengan narasi HTF? Apakah MTF adalah _dealing range_ tempat setup terbentuk? [FAKTA + INFERENSI]
+- **LTF Context:** Evaluasi struktur LTF saat ini. Apakah selaras dengan narasi HTF dan MTF, atau ini _inducement_? [INFERENSI]
 
 ## 2. Peta Jebakan Ritel (Retail Trap Mapping) — INI JANGKAR ANALISIS
 
@@ -1165,6 +1304,12 @@ Hindari klaim absolut ("pasti", "dijamin", "akan"). Gunakan kalibrasi probabilit
 [FAKTA] Fair Value Gap 3-candle murni mekanis: bullish bila low[i] > high[i-2] (range [high[i-2], low[i]]), bearish bila high[i] < low[i-2] (range [high[i], low[i-2]]); gap di bawah {{HTF_FVG_ATR_MULT}}×ATR disaring. Kolom: tanggal,tipe,lower,upper,status (filled bila candle setelahnya menembus penuh rentang).
 ```
 {{HTF_FVG_TABLE}}
+```
+
+### FVG Mekanis MTF ({{MTF_INTERVAL_LABEL}}, oldest→newest, terbaru maks. {{MTF_FVG_COUNT}})
+[FAKTA] Fair Value Gap 3-candle murni mekanis: bullish bila low[i] > high[i-2] (range [high[i-2], low[i]]), bearish bila high[i] < low[i-2] (range [high[i], low[i-2]]); gap di bawah {{MTF_FVG_ATR_MULT}}×ATR disaring. Kolom: datetime,tipe,lower,upper,status (filled bila candle setelahnya menembus penuh rentang).
+```
+{{MTF_FVG_TABLE}}
 ```
 
 ### FVG Mekanis LTF ({{LTF_INTERVAL_LABEL}}, oldest→newest, terbaru maks. {{LTF_FVG_COUNT}})
@@ -1219,6 +1364,21 @@ Hindari klaim absolut ("pasti", "dijamin", "akan"). Gunakan kalibrasi probabilit
     byte-unchanged. See §4.8.
 13. **Rendered text is not sanitized for prompt-injection**, but all injected content is numeric/symbol data controlled by the tool, so no untrusted free-text enters the prompt.
 14. **HTTP 429 bursts** are theoretically possible on a shared IP; the retry/backoff policy handles transient cases but a hard block would surface as `NetworkError` (exit 4).
+15. **Three-tier prompt-size growth + golden-hash regeneration (3-tier extension).** The
+    MTF tier adds a third candle table plus its summary/FVG/swing prose, so the
+    rendered prompt grows. The measured 3-fixture offline render is **29,581 bytes
+    (~7,395 tokens)** — about 24.6% of the `prompt_bytes_warn` (120,000) threshold,
+    well within limits. The frozen `GOLDEN_SHA256` /
+    `GOLDEN_BYTES` (in `tests/conftest.py`) were regenerated from the 3-fixture
+    offline render (`htf_daily.csv` + `mtf_4h.csv` + `ltf_hourly.csv`) and must be
+    regenerated again (never hand-edited) after any intentional template change. If
+    token cost ever matters, lower `--mtf-candles` (default `120`) rather than
+    raising the warn threshold.
+16. **Two-tier invocation is no longer expressible (3-tier extension).** The middle
+    tier always has a default (`4h`) and cannot be disabled, so a single run always
+    emits three blocks. This is deliberate: a "how many tiers" runtime switch would
+    reintroduce variable-arity complexity for no product benefit. Three intervals
+    must be DISTINCT (validated in `build_config`; violation → `ConfigError`, exit 2).
 
 ---
 
@@ -1231,6 +1391,7 @@ Hindari klaim absolut ("pasti", "dijamin", "akan"). Gunakan kalibrasi probabilit
 | 3 | Pseudocode for swing detection + classification | §7.1, §7.2 |
 | 4 | Exact payload text format + concrete rendered example | §8, §12 |
 | 5 | Additional risks/assumptions | §14 |
+| — | Three-tier extension (HTF + MTF + LTF native tiers) | §1.1, §3, §4.1, §4.8, §8.2, §8.3, §10–§12, §14 |
 | — | HARD NON-GOALS restated (+ FVG amendment) | §2 |
 | — | Mechanical FVG definition + fill status | §4.7 |
 | — | CLI → module call flow | §6 |

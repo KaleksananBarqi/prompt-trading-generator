@@ -37,7 +37,7 @@ from smc_prompt.template_renderer import (
     render,
 )
 
-from .conftest import HTF_CSV, LTF_CSV, make_candle, make_swing
+from .conftest import HTF_CSV, LTF_CSV, MTF_CSV, make_candle, make_swing
 
 
 # --------------------------------------------------------------------------
@@ -283,15 +283,18 @@ def _offline_prompt(tmp_path: Path) -> str:
     return cli.run(
         "BTCUSDT",
         htf_candles=60,
+        mtf_candles=120,
         ltf_candles=100,
         swing_lookback=5,
         distance_reference="nearest",
         include_atr=True,
         output_dir=str(tmp_path),
         htf_interval="1d",
+        mtf_interval="4h",
         ltf_interval="1h",
         input_csv=str(HTF_CSV),
         htf_file=str(HTF_CSV),
+        mtf_file=str(MTF_CSV),
         ltf_file=str(LTF_CSV),
     ).prompt
 
@@ -315,7 +318,8 @@ def test_render_accepts_literal_braces_in_payload() -> None:
 
     config = cfg.build_config("TESTUSDT")
     htf = _analysis(atr=Decimal("100"), price=Decimal("1000"))
-    ltf = _analysis(atr=Decimal("50"), price=Decimal("1000"))
+    mtf = _analysis(atr=Decimal("50"), price=Decimal("1000"))
+    ltf = _analysis(atr=Decimal("25"), price=Decimal("1000"))
     facts = ReferenceFacts(
         recent_high="1000.00 pada x (DI ATAS harga), status: untested",
         recent_low="900.00 pada x (DI BAWAH harga), status: untested",
@@ -325,6 +329,7 @@ def test_render_accepts_literal_braces_in_payload() -> None:
         window_low="900.00 pada x (DI BAWAH harga), status: untested",
     )
     htf = replace(htf, reference_facts=facts)
+    mtf = replace(mtf, reference_facts=facts)
     ltf = replace(ltf, reference_facts=facts)
 
     payload = build_payload(
@@ -332,8 +337,10 @@ def test_render_accepts_literal_braces_in_payload() -> None:
         generated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         current_price=Decimal("1000"),
         htf=htf,
+        mtf=mtf,
         ltf=ltf,
         htf_candles=_volume_series(["10", "10", "20"]),
+        mtf_candles=_volume_series(["10", "10", "25"]),
         ltf_candles=_volume_series(["10", "10", "30"]),
         config=config,
     )
@@ -368,11 +375,16 @@ def _swing(index: int, price: str, swing_type: SwingType) -> SwingPoint:
     )
 
 
-def _analysis(*, atr: Decimal | None = None, price: Decimal = Decimal("100")) -> TimeframeAnalysis:
+def _analysis(
+    *,
+    atr: Decimal | None = None,
+    price: Decimal = Decimal("100"),
+    timeframe: str = "1h",
+) -> TimeframeAnalysis:
     high = _swing(0, str(price), SwingType.HIGH)
     low = _swing(1, str(price - Decimal("10")), SwingType.LOW)
     return TimeframeAnalysis(
-        timeframe="1h",
+        timeframe=timeframe,
         structure_class=StructureClass.RANGING,
         swing_high=high,
         swing_low=low,
@@ -382,3 +394,163 @@ def _analysis(*, atr: Decimal | None = None, price: Decimal = Decimal("100")) ->
         candle_count=3,
         swings=(high, low),
     )
+
+
+# --------------------------------------------------------------------------
+# 3-timeframe support (MTF tier)
+# --------------------------------------------------------------------------
+
+
+def _three_tier_payload(*, include_facts: bool = True) -> dict[str, str]:
+    from datetime import datetime, timezone
+
+    from smc_prompt.models import ReferenceFacts
+
+    config = cfg.build_config("TESTUSDT")
+    htf = _analysis(atr=Decimal("100"), price=Decimal("1000"), timeframe="1d")
+    mtf = _analysis(atr=Decimal("50"), price=Decimal("1000"), timeframe="4h")
+    ltf = _analysis(atr=Decimal("25"), price=Decimal("1000"), timeframe="1h")
+    if include_facts:
+        facts = ReferenceFacts(
+            recent_high="1000.00 pada 2026-01-01 00:00 (DI ATAS harga), status: untested",
+            recent_low="900.00 pada 2026-01-01 01:00 (DI BAWAH harga), status: untested",
+            nearest_high="1000.00 pada 2026-01-01 00:00 (DI ATAS harga), status: untested",
+            nearest_low="900.00 pada 2026-01-01 01:00 (DI BAWAH harga), status: untested",
+            window_high="1000.00 pada 2026-01-01 00:00 (DI ATAS harga), status: untested",
+            window_low="900.00 pada 2026-01-01 01:00 (DI BAWAH harga), status: untested",
+        )
+        htf = replace(htf, reference_facts=facts)
+        mtf = replace(mtf, reference_facts=facts)
+        ltf = replace(ltf, reference_facts=facts)
+    candles = _volume_series(["10", "10", "20"])
+    return build_payload(
+        symbol="TESTUSDT",
+        generated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        current_price=Decimal("1000"),
+        htf=htf,
+        mtf=mtf,
+        ltf=ltf,
+        htf_candles=candles,
+        mtf_candles=candles,
+        ltf_candles=candles,
+        config=config,
+    )
+
+
+def test_build_config_accepts_three_intervals() -> None:
+    config = cfg.build_config(
+        "TESTUSDT", htf_interval="1d", mtf_interval="4h", ltf_interval="1h"
+    )
+
+    assert config.mtf_interval == "4h"
+    assert config.mtf_interval_label == "4H"
+    assert config.mtf_candles == 120
+
+
+def test_build_config_rejects_duplicate_intervals() -> None:
+    with pytest.raises(ConfigError, match="DISTINCT intervals"):
+        cfg.build_config(
+            "TESTUSDT", htf_interval="1d", mtf_interval="4h", ltf_interval="4h"
+        )
+    with pytest.raises(ConfigError, match="DISTINCT intervals"):
+        cfg.build_config(
+            "TESTUSDT", htf_interval="1h", mtf_interval="1h", ltf_interval="1h"
+        )
+
+
+def test_default_interval_trio_is_distinct() -> None:
+    assert len({cfg.HTF_INTERVAL, cfg.MTF_INTERVAL, cfg.LTF_INTERVAL}) == 3
+
+
+def test_mtf_candles_below_minimum_rejected() -> None:
+    with pytest.raises(ConfigError, match="--mtf-candles"):
+        cfg.build_config("TESTUSDT", mtf_candles=9)
+
+
+def test_mtf_fetch_limit_capped() -> None:
+    small = cfg.build_config("TESTUSDT", mtf_candles=50)
+    assert small.mtf_fetch_limit == 100  # 50 + context_buffer(50)
+
+    big = cfg.build_config("TESTUSDT", mtf_candles=1000)
+    assert big.mtf_fetch_limit == cfg.FETCH_LIMIT_MAX
+
+
+def test_mtf_uses_datetime_stamp() -> None:
+    payload = _three_tier_payload()
+
+    # MTF sits below the HTF tier, so it uses the datetime form, not the date.
+    assert payload["MTF_SWING_HIGH_DATE"] == "2026-01-01 00:00"
+    assert ":" in payload["MTF_SWING_HIGH_DATE"]
+    # The first MTF candle row is datetime-stamped.
+    assert payload["MTF_CANDLE_TABLE_CSV"].splitlines()[0].startswith(
+        "2026-01-01 00:00,"
+    )
+
+
+def test_required_placeholders_all_resolved_for_three_tiers() -> None:
+    from smc_prompt.models import REQUIRED_PLACEHOLDERS
+
+    payload = _three_tier_payload()
+    mtf_keys = [key for key in REQUIRED_PLACEHOLDERS if key.startswith("MTF_")]
+
+    assert len(mtf_keys) == 26
+    assert all(key in payload for key in mtf_keys)
+    assert all(str(payload[key]).strip() for key in mtf_keys)
+    assert "MTF_ATR14" in payload
+
+
+def test_analyze_three_series_renders_three_blocks(tmp_path: Path) -> None:
+    prompt = _offline_prompt(tmp_path)
+
+    assert "Ringkasan Data HTF" in prompt
+    assert "Ringkasan Data MTF" in prompt
+    assert "Ringkasan Data LTF" in prompt
+    assert "Multi-Timeframe Alignment (HTF, MTF & LTF)" in prompt
+    assert "FVG Mekanis MTF" in prompt
+
+
+def test_no_atr_removes_all_three_atr_lines(tmp_path: Path) -> None:
+    from smc_prompt.template_renderer import render
+
+    payload = _three_tier_payload()
+    with_atr = render(payload, include_atr=True).text
+    without_atr = render(payload, include_atr=False).text
+
+    assert "ATR(14): " not in ""
+    assert with_atr.count("ATR(14): ") == 3
+    assert without_atr.count("ATR(14): ") == 0
+    # Removing the ATR lines drops exactly the three lines and nothing else.
+    lines_on = [
+        line for line in with_atr.split("\n") if "ATR(14): " not in line
+    ]
+    lines_off = without_atr.split("\n")
+    assert lines_on == lines_off
+
+
+def test_prompt_size_three_tier_bytes(tmp_path: Path) -> None:
+    prompt = _offline_prompt(tmp_path)
+    size = len(prompt.encode("utf-8"))
+
+    # Documentation anchor for DESIGN_SPEC §14: the 3-tier render stays well
+    # below the warn threshold.
+    assert size < cfg.PROMPT_BYTES_WARN
+    assert size > 18_684  # strictly larger than the old dual-tier artifact
+
+
+def test_non_goal_strings_absent(tmp_path: Path) -> None:
+    """Tool-emitted data blocks must not contain forbidden SMC/ICT tokens.
+
+    The static instructional body legitimately names these concepts (it asks
+    the downstream LLM about them), so the check is scoped to the tool-emitted
+    data block headers (which are never emitted by the analyzer).
+    """
+
+    prompt = _offline_prompt(tmp_path)
+
+    for token in ("SSL", "BSL"):
+        assert f": {token}" not in prompt
+        assert f",{token}" not in prompt
+    # ``structure_class`` values are never rendered as "bias".
+    for line in prompt.split("\n"):
+        if "Klasifikasi struktur (mekanis)" in line or "struktur (mekanis)" in line:
+            assert "bias" not in line.lower()

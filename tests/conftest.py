@@ -17,17 +17,26 @@ from smc_prompt.models import Candle, SwingPoint, SwingType
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 HTF_CSV = FIXTURE_DIR / "htf_daily.csv"
+MTF_CSV = FIXTURE_DIR / "mtf_4h.csv"
 LTF_CSV = FIXTURE_DIR / "ltf_hourly.csv"
 
 #: Byte-frozen hash of the offline render produced from the committed fixtures.
-#: Regenerate with ``python tests/fixtures/generate_fixtures.py`` then see
-#: ``tests/test_golden_render.py`` for how the value is asserted.
+#: Regenerate with ``python tests/fixtures/generate_fixtures.py`` (deterministic
+#: fixtures) and the hash with::
 #:
-#: Phase 5 regenerated this value: the template now also renders the
-#: ATR-as-%-of-price line, the ATR-normalized swing distances and the
-#: relative-volume / spike facts (see DESIGN_SPEC §4.9 / §8.2).
-GOLDEN_SHA256 = "f5a47d8fac567316102faf9a8c19e0a3130d65bb4272b74b0b71f0ebd8bd30c7"
-GOLDEN_BYTES = 18684
+#:     python -c "import hashlib; from smc_prompt import cli; \
+#:       from tests.conftest import HTF_CSV, MTF_CSV, LTF_CSV; \
+#:       t=cli.run('BTCUSDT', htf_candles=60, ltf_candles=100, \
+#:       swing_lookback=5, distance_reference='nearest', include_atr=True, \
+#:       output_dir='output', htf_interval='1d', ltf_interval='1h', \
+#:       input_csv=str(HTF_CSV), htf_file=str(HTF_CSV), \
+#:       mtf_file=str(MTF_CSV), ltf_file=str(LTF_CSV)).prompt; \
+#:       print(hashlib.sha256(t.encode('utf-8')).hexdigest(), len(t.encode('utf-8')))"
+#:
+#: The 3-tier extension added the MTF data block, so the hash and byte count
+#: were regenerated from the 3-fixture offline render (HTF + MTF + LTF).
+GOLDEN_SHA256 = "47fe7efb62b4c730f2c3a93cf697643b1727557117627c6f5c7ff252f6ee7658"
+GOLDEN_BYTES = 29581
 
 BASE_TIME = datetime(2026, 1, 1, tzinfo=timezone.utc)
 

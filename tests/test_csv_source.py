@@ -19,7 +19,7 @@ from smc_prompt import config as cfg
 from smc_prompt.csv_source import LocalCsvSource, load_csv_series
 from smc_prompt.errors import ConfigError, NetworkError
 
-from .conftest import HTF_CSV, LTF_CSV
+from .conftest import HTF_CSV, LTF_CSV, MTF_CSV
 
 
 def _write_csv(path: Path, rows: list[str], header: str | None = None) -> Path:
@@ -30,7 +30,12 @@ def _write_csv(path: Path, rows: list[str], header: str | None = None) -> Path:
 
 def _source(tmp_path: Path) -> LocalCsvSource:
     config = cfg.build_config("TESTUSDT")
-    return LocalCsvSource(config, htf_file=str(HTF_CSV), ltf_file=str(LTF_CSV))
+    return LocalCsvSource(
+        config,
+        htf_file=str(HTF_CSV),
+        mtf_file=str(MTF_CSV),
+        ltf_file=str(LTF_CSV),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -204,9 +209,28 @@ def test_local_source_unknown_interval_raises() -> None:
 
 
 def test_local_source_identical_intervals_rejected(tmp_path: Path) -> None:
-    config = cfg.build_config("TESTUSDT", htf_interval="1h", ltf_interval="1h")
+    # ``build_config`` now enforces the three-way distinctness rule, so the
+    # duplicate trio is rejected before ``LocalCsvSource`` is constructed.
+    with pytest.raises(ConfigError, match="DISTINCT intervals"):
+        cfg.build_config("TESTUSDT", htf_interval="1h", ltf_interval="1h")
+
+
+def test_local_source_three_way_distinctness_guard(tmp_path: Path) -> None:
+    """Direct construction still guards a duplicate trio (defense-in-depth)."""
+
+    config = cfg.build_config("TESTUSDT")  # valid 1d / 4h / 1h trio
+    # Bypass ``build_config`` validation by mutating the frozen config to a
+    # duplicate trio, then assert the source-level guard fires.
+    from dataclasses import replace
+
+    bad = replace(config, ltf_interval=config.htf_interval)
     with pytest.raises(ConfigError, match="distinct --htf-interval"):
-        LocalCsvSource(config, htf_file=str(HTF_CSV), ltf_file=str(LTF_CSV))
+        LocalCsvSource(
+            bad,
+            htf_file=str(HTF_CSV),
+            mtf_file=str(MTF_CSV),
+            ltf_file=str(LTF_CSV),
+        )
 
 
 # --------------------------------------------------------------------------
@@ -224,6 +248,8 @@ def test_cli_offline_runs_from_csv(tmp_path: Path) -> None:
             str(HTF_CSV),
             "--htf-file",
             str(HTF_CSV),
+            "--mtf-file",
+            str(MTF_CSV),
             "--ltf-file",
             str(LTF_CSV),
             "--output-dir",
@@ -235,6 +261,36 @@ def test_cli_offline_runs_from_csv(tmp_path: Path) -> None:
     assert list(tmp_path.glob("BTCUSDT_*.md"))
 
 
+def test_cli_offline_three_csv_mode(tmp_path: Path) -> None:
+    """--input-csv + three explicit --*-file flags renders all three tiers."""
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.main,
+        [
+            "BTCUSDT",
+            "--input-csv",
+            str(HTF_CSV),
+            "--htf-file",
+            str(HTF_CSV),
+            "--mtf-file",
+            str(MTF_CSV),
+            "--ltf-file",
+            str(LTF_CSV),
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    written = list(tmp_path.glob("BTCUSDT_*.md"))
+    assert written
+    text = written[0].read_text(encoding="utf-8")
+    assert "Ringkasan Data HTF" in text
+    assert "Ringkasan Data MTF" in text
+    assert "Ringkasan Data LTF" in text
+
+
 def test_cli_htf_file_without_input_csv_is_config_error() -> None:
     runner = CliRunner()
     result = runner.invoke(
@@ -243,6 +299,17 @@ def test_cli_htf_file_without_input_csv_is_config_error() -> None:
 
     assert result.exit_code == 2
     assert "require --input-csv" in result.output
+
+
+def test_cli_mtf_file_without_input_csv_is_config_error() -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.main, ["BTCUSDT", "--mtf-file", str(MTF_CSV)]
+    )
+
+    assert result.exit_code == 2
+    assert "require --input-csv" in result.output
+    assert "--input-csv" in result.output
 
 
 def test_cli_network_is_default_path(monkeypatch: pytest.MonkeyPatch) -> None:

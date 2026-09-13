@@ -56,3 +56,7 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+.roo
+.roomodes
+SESSION.md
+docs

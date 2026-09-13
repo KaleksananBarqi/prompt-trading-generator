@@ -137,7 +137,8 @@ def load_csv_series(path: str, *, interval: str) -> CsvSeries:
     if not file_path.is_file():
         raise ConfigError(
             f"Offline CSV file not found: {path}. Provide --input-csv (used "
-            f"for both series) or explicit --htf-file / --ltf-file paths."
+            f"for all three series) or explicit --htf-file / --mtf-file / "
+            f"--ltf-file paths."
         )
 
     try:
@@ -250,22 +251,33 @@ class LocalCsvSource:
         config: cfg.Config,
         *,
         htf_file: str,
+        mtf_file: str,
         ltf_file: str,
     ) -> None:
         self._config = config
         self._htf_file = htf_file
+        self._mtf_file = mtf_file
         self._ltf_file = ltf_file
 
-        if config.htf_interval == config.ltf_interval:
+        # Defense-in-depth: ``build_config`` already enforces three DISTINCT
+        # intervals, but a directly-constructed source must not silently map
+        # two tiers to one series either.
+        if len(
+            {config.htf_interval, config.mtf_interval, config.ltf_interval}
+        ) != 3:
             raise ConfigError(
-                "Offline mode requires distinct --htf-interval and "
-                "--ltf-interval values so each CSV maps to one timeframe "
-                f"(both were '{config.htf_interval}')."
+                "Offline mode requires distinct --htf-interval, --mtf-interval "
+                "and --ltf-interval values so each CSV maps to one timeframe "
+                f"(got htf={config.htf_interval}, mtf={config.mtf_interval}, "
+                f"ltf={config.ltf_interval})."
             )
 
         self._series: dict[str, CsvSeries] = {
             config.htf_interval: load_csv_series(
                 htf_file, interval=config.htf_interval
+            ),
+            config.mtf_interval: load_csv_series(
+                mtf_file, interval=config.mtf_interval
             ),
             config.ltf_interval: load_csv_series(
                 ltf_file, interval=config.ltf_interval

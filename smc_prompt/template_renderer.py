@@ -348,8 +348,10 @@ def build_payload(
     generated_at: datetime,
     current_price: Decimal,
     htf: TimeframeAnalysis,
+    mtf: TimeframeAnalysis,
     ltf: TimeframeAnalysis,
     htf_candles: Sequence[Candle],
+    mtf_candles: Sequence[Candle],
     ltf_candles: Sequence[Candle],
     config: cfg.Config,
 ) -> dict[str, str]:
@@ -371,6 +373,15 @@ def build_payload(
         equal_mult=config.equal_levels_atr_mult,
         price_format=price_format,
     )
+    mtf_swings = _render_swings(
+        mtf.swings if mtf.swings else (mtf.swing_high, mtf.swing_low),
+        # MTF carries a datetime stamp (like LTF), not the HTF date stamp.
+        htf=False,
+        limit=config.swings_table_rows,
+        atr=mtf.atr,
+        equal_mult=config.equal_levels_atr_mult,
+        price_format=price_format,
+    )
     ltf_swings = _render_swings(
         ltf.swings if ltf.swings else (ltf.swing_high, ltf.swing_low),
         htf=False,
@@ -381,8 +392,9 @@ def build_payload(
     )
 
     htf_facts = htf.reference_facts
+    mtf_facts = mtf.reference_facts
     ltf_facts = ltf.reference_facts
-    if htf_facts is None or ltf_facts is None:  # pragma: no cover - defensive
+    if htf_facts is None or mtf_facts is None or ltf_facts is None:
         raise SmcPromptError(
             "Reference facts missing from analysis; aborting before render."
         )
@@ -437,6 +449,51 @@ def build_payload(
         ),
         "HTF_FVG_COUNT": str(config.fvg_table_rows),
         "HTF_FVG_ATR_MULT": cfg.fmt_ratio(config.fvg_atr_mult),
+        "MTF_STRUCTURE_CLASS": mtf.structure_class.value,
+        "MTF_SWING_HIGH": fmt(mtf.swing_high.price),
+        "MTF_SWING_HIGH_DATE": cfg.fmt_ltf_datetime(mtf.swing_high.open_time),
+        "MTF_DIST_TO_HIGH": price_format.fmt_distance(
+            current_price, mtf.swing_high.price
+        ),
+        "MTF_DIST_TO_HIGH_ATR": _atr_normalized_distance(
+            current_price, mtf.swing_high.price, mtf.atr
+        ),
+        "MTF_SWING_LOW": fmt(mtf.swing_low.price),
+        "MTF_SWING_LOW_DATE": cfg.fmt_ltf_datetime(mtf.swing_low.open_time),
+        "MTF_DIST_TO_LOW": price_format.fmt_distance(
+            current_price, mtf.swing_low.price
+        ),
+        "MTF_DIST_TO_LOW_ATR": _atr_normalized_distance(
+            current_price, mtf.swing_low.price, mtf.atr
+        ),
+        "MTF_VOLUME_RELATIVE": _volume_relative(mtf),
+        "MTF_VOLUME_SPIKE": _volume_spike(mtf),
+        "MTF_INTERVAL_LABEL": config.mtf_interval_label,
+        "MTF_CANDLE_COUNT": str(mtf.candle_count),
+        "MTF_CANDLE_TABLE_CSV": render_csv_table(
+            mtf_candles, htf=False, price_format=price_format
+        ),
+        "MTF_SWINGS_TABLE": mtf_swings,
+        "MTF_REF_HIGH_RECENT": mtf_facts.recent_high,
+        "MTF_REF_LOW_RECENT": mtf_facts.recent_low,
+        "MTF_REF_HIGH_NEAREST": mtf_facts.nearest_high,
+        "MTF_REF_LOW_NEAREST": mtf_facts.nearest_low,
+        "MTF_REF_HIGH_WINDOW_MAX": mtf_facts.window_high,
+        "MTF_REF_LOW_WINDOW_MIN": mtf_facts.window_low,
+        "MTF_EQUAL_HIGHS": _render_equal_levels(
+            mtf.equal_highs, price_format=price_format
+        ),
+        "MTF_EQUAL_LOWS": _render_equal_levels(
+            mtf.equal_lows, price_format=price_format
+        ),
+        "MTF_FVG_TABLE": _render_fvg_table(
+            mtf.fvgs,
+            htf=False,
+            limit=config.fvg_table_rows,
+            price_format=price_format,
+        ),
+        "MTF_FVG_COUNT": str(config.fvg_table_rows),
+        "MTF_FVG_ATR_MULT": cfg.fmt_ratio(config.fvg_atr_mult),
         "LTF_STRUCTURE_CLASS": ltf.structure_class.value,
         "LTF_SWING_HIGH": fmt(ltf.swing_high.price),
         "LTF_SWING_HIGH_DATE": cfg.fmt_ltf_datetime(ltf.swing_high.open_time),
@@ -485,11 +542,12 @@ def build_payload(
     }
 
     if config.include_atr:
-        if htf.atr is None or ltf.atr is None:
+        if htf.atr is None or mtf.atr is None or ltf.atr is None:
             raise SmcPromptError(
                 "ATR requested but not computable; aborting before render."
             )
         payload["HTF_ATR14"] = cfg.fmt_atr(htf.atr)
+        payload["MTF_ATR14"] = cfg.fmt_atr(mtf.atr)
         payload["LTF_ATR14"] = cfg.fmt_atr(ltf.atr)
 
     _validate_payload(payload, include_atr=config.include_atr)

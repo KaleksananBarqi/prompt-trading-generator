@@ -19,10 +19,11 @@ from .errors import ConfigError
 # --------------------------------------------------------------------------
 
 HTF_INTERVAL: str = "1d"
+MTF_INTERVAL: str = "4h"
 LTF_INTERVAL: str = "1h"
 
 #: Every kline interval Binance Spot accepts, in ascending-duration order. Used
-#: to validate ``--htf-interval`` / ``--ltf-interval``.
+#: to validate ``--htf-interval`` / ``--mtf-interval`` / ``--ltf-interval``.
 BINANCE_INTERVALS: tuple[str, ...] = (
     "1m",
     "3m",
@@ -107,6 +108,7 @@ DEFAULT_BASE_URLS: tuple[str, ...] = (
 # --------------------------------------------------------------------------
 
 DEFAULT_HTF_CANDLES: int = 60
+DEFAULT_MTF_CANDLES: int = 120
 DEFAULT_LTF_CANDLES: int = 100
 DEFAULT_SWING_LOOKBACK: int = 5
 DEFAULT_SWING_MERGE_ATR_MULT: Decimal = Decimal("0.5")
@@ -378,6 +380,7 @@ class Config:
 
     symbol: str
     htf_candles: int = DEFAULT_HTF_CANDLES
+    mtf_candles: int = DEFAULT_MTF_CANDLES
     ltf_candles: int = DEFAULT_LTF_CANDLES
     swing_lookback: int = DEFAULT_SWING_LOOKBACK
 
@@ -385,6 +388,7 @@ class Config:
     include_atr: bool = True
 
     htf_interval: str = HTF_INTERVAL
+    mtf_interval: str = MTF_INTERVAL
     ltf_interval: str = LTF_INTERVAL
     swing_merge_atr_mult: Decimal = DEFAULT_SWING_MERGE_ATR_MULT
     atr_period: int = DEFAULT_ATR_PERIOD
@@ -427,6 +431,12 @@ class Config:
         return min(self.htf_candles + self.context_buffer, self.fetch_limit_max)
 
     @property
+    def mtf_fetch_limit(self) -> int:
+        """Candles to request for MTF (table size + context buffer, capped)."""
+
+        return min(self.mtf_candles + self.context_buffer, self.fetch_limit_max)
+
+    @property
     def ltf_fetch_limit(self) -> int:
         """Candles to request for LTF (table size + context buffer, capped)."""
 
@@ -439,6 +449,12 @@ class Config:
         return interval_label(self.htf_interval)
 
     @property
+    def mtf_interval_label(self) -> str:
+        """Prompt label for :attr:`mtf_interval` (e.g. ``4h`` -> ``4H``)."""
+
+        return interval_label(self.mtf_interval)
+
+    @property
     def ltf_interval_label(self) -> str:
         """Prompt label for :attr:`ltf_interval` (e.g. ``1h`` -> ``1H``)."""
 
@@ -449,11 +465,13 @@ def build_config(
     symbol: str,
     *,
     htf_candles: int = DEFAULT_HTF_CANDLES,
+    mtf_candles: int = DEFAULT_MTF_CANDLES,
     ltf_candles: int = DEFAULT_LTF_CANDLES,
     swing_lookback: int = DEFAULT_SWING_LOOKBACK,
     distance_reference: str = DISTANCE_REFERENCE_NEAREST,
     include_atr: bool = True,
     htf_interval: str = HTF_INTERVAL,
+    mtf_interval: str = MTF_INTERVAL,
     ltf_interval: str = LTF_INTERVAL,
     output_dir: str = DEFAULT_OUTPUT_DIR,
     volume_mean_period: int = DEFAULT_VOLUME_MEAN_PERIOD,
@@ -480,6 +498,8 @@ def build_config(
 
     if not isinstance(htf_candles, int) or htf_candles < MIN_CANDLES:
         raise ConfigError("--htf-candles must be an integer >= 10.")
+    if not isinstance(mtf_candles, int) or mtf_candles < MIN_CANDLES:
+        raise ConfigError("--mtf-candles must be an integer >= 10.")
     if not isinstance(ltf_candles, int) or ltf_candles < MIN_CANDLES:
         raise ConfigError("--ltf-candles must be an integer >= 10.")
 
@@ -491,7 +511,19 @@ def build_config(
         )
 
     validate_interval(htf_interval, flag="--htf-interval")
+    validate_interval(mtf_interval, flag="--mtf-interval")
     validate_interval(ltf_interval, flag="--ltf-interval")
+
+    # The three tiers must map to three DISTINCT series. Enforcing this in
+    # ``build_config`` (not only in ``LocalCsvSource``) makes the rule
+    # mode-independent: identical tiers are meaningless on both the network
+    # and offline paths and would otherwise emit duplicate blocks.
+    if len({htf_interval, mtf_interval, ltf_interval}) != 3:
+        raise ConfigError(
+            "--htf-interval, --mtf-interval and --ltf-interval must be three "
+            "DISTINCT intervals so each tier maps to its own series "
+            f"(got htf={htf_interval}, mtf={mtf_interval}, ltf={ltf_interval})."
+        )
 
     if not isinstance(volume_mean_period, int) or volume_mean_period < 1:
         raise ConfigError("volume_mean_period must be an integer >= 1.")
@@ -513,11 +545,13 @@ def build_config(
     return Config(
         symbol=normalized_symbol,
         htf_candles=htf_candles,
+        mtf_candles=mtf_candles,
         ltf_candles=ltf_candles,
         swing_lookback=swing_lookback,
         distance_reference=distance_reference,
         include_atr=include_atr,
         htf_interval=htf_interval,
+        mtf_interval=mtf_interval,
         ltf_interval=ltf_interval,
         output_dir=output_dir,
         volume_mean_period=volume_mean_period,

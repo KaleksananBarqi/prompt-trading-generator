@@ -15,22 +15,25 @@ import pytest
 from smc_prompt import cli
 from smc_prompt.errors import NetworkError
 
-from .conftest import GOLDEN_BYTES, GOLDEN_SHA256, HTF_CSV, LTF_CSV
+from .conftest import GOLDEN_BYTES, GOLDEN_SHA256, HTF_CSV, LTF_CSV, MTF_CSV
 
 
 def _run_offline(output_dir: Path) -> str:
     result = cli.run(
         "BTCUSDT",
         htf_candles=60,
+        mtf_candles=120,
         ltf_candles=100,
         swing_lookback=5,
         distance_reference="nearest",
         include_atr=True,
         output_dir=str(output_dir),
         htf_interval="1d",
+        mtf_interval="4h",
         ltf_interval="1h",
         input_csv=str(HTF_CSV),
         htf_file=str(HTF_CSV),
+        mtf_file=str(MTF_CSV),
         ltf_file=str(LTF_CSV),
     )
     return result.prompt
@@ -78,6 +81,7 @@ def test_offline_output_file_written(tmp_path: Path) -> None:
     result = cli.run(
         "BTCUSDT",
         htf_candles=60,
+        mtf_candles=120,
         ltf_candles=100,
         swing_lookback=5,
         distance_reference="nearest",
@@ -85,6 +89,7 @@ def test_offline_output_file_written(tmp_path: Path) -> None:
         output_dir=str(tmp_path),
         input_csv=str(HTF_CSV),
         htf_file=str(HTF_CSV),
+        mtf_file=str(MTF_CSV),
         ltf_file=str(LTF_CSV),
     )
 

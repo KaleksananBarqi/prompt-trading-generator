@@ -17,6 +17,31 @@ didelegasikan sepenuhnya kepada LLM yang membaca prompt.
 
 ---
 
+## Mengapa Repositori Ini Dibuat?
+
+Ada tiga alasan praktis di balik `smc-prompt`:
+
+1. **Murah — SMC murni cukup dengan data publik.** Analisis Smart Money
+   Concepts yang mekanis (swing, struktur, equal highs/lows, FVG) hanya
+   membutuhkan **OHLCV**. Tidak ada kebutuhan data eksotis seperti order flow,
+   footprint, likuiditas berbayar, atau feed institusional. **Binance public
+   REST API** menyediakan seluruh data yang diperlukan **tanpa API key** dan
+   **tanpa biaya** — cukup menarik data publik, selesai.
+
+2. **Tanpa API AI berbayar.** Tool ini **tidak memanggil LLM API apa pun** dan
+   tidak mengunci Anda ke penyedia AI berbayar (lihat "Non-Goals"). Ia hanya
+   menyiapkan prompt akhir berbasis fakta mekanis; Anda cukup **mem-paste**
+   prompt tersebut ke AI pilihan Anda — **termasuk layanan AI gratis**.
+
+3. **Sederhana.** Satu CLI sekali-jalan: satu perintah mengambil data,
+   menghitung fakta mekanis, merender prompt, lalu menulis berkas `.md` (plus
+   salin clipboard). Tanpa server, tanpa database, tanpa konfigurasi berat.
+
+Singkatnya: **data murah, tanpa biaya AI, dan alur sesederhana mungkin** — Anda
+tinggal menjalankan satu perintah lalu menempelkan hasilnya ke LLM mana pun.
+
+---
+
 ## Fitur Utama
 
 - **Dua lapisan payload** yang disuntikkan ke prompt:
@@ -30,9 +55,10 @@ didelegasikan sepenuhnya kepada LLM yang membaca prompt.
     (`x{n}×ATR`), ATR(14) diringkas sebagai **persentase harga**
     (`ATR ≈ x% of price`), dan candle terakhir diberi **sinyal volume mekanis**
     (volume relatif `last/mean(N)` dan flag spike). Lihat Phase 5 di bawah.
-  - **Layer B — Raw Candle Table:** tabel OHLCV ringkas format CSV (HTF dan LTF;
-    default HTF daily `1d` dan LTF hourly `1h`, interval dapat dikonfigurasi)
-    agar LLM dapat menurunkan sendiri Order Block dan CHoCH/MSS (beberapa swing).
+  - **Layer B — Raw Candle Table:** tabel OHLCV ringkas format CSV untuk **tiga
+    timeframe native** (HTF, MTF, LTF; default `1d` / `4h` / `1h`, tiap interval
+    dapat dikonfigurasi) agar LLM dapat menurunkan sendiri Order Block dan
+    CHoCH/MSS (beberapa swing). Ketiga interval harus **berbeda (distinct)**.
     FVG kini dihitung di Layer A sebagai fakta mekanis murni (lihat di bawah).
 - **Deteksi swing deterministik:** N-bar Williams Fractal (default `N = 5`)
   dengan post-filter pemisahan ATR dan **post-pass skeleton bergantian**
@@ -57,11 +83,15 @@ didelegasikan sepenuhnya kepada LLM yang membaca prompt.
   `./output/<SYMBOL>_<timestamp>.md` lalu disalin ke clipboard (best-effort);
   `--stdout` menambahkan cetak ke stdout. Jika clipboard tidak tersedia
   (lingkungan headless), itu hanya peringatan (exit 0).
+- **Tiga timeframe native (3-tier)** — satu kali jalan mengambil, menganalisis,
+  dan merender **tiga seri** (HTF + MTF + LTF; default `1d` / `4h` / `1h`) ke
+  dalam satu prompt. Tier MTF adalah instance ketiga melalui pipeline
+  `analyze()` yang sama; `TimeframeAnalysis` tidak berubah.
 - **Mode offline / data lokal (Phase 4)** — `--input-csv` (opsional
-  `--htf-file` / `--ltf-file`) menjalankan tool **tanpa akses jaringan
-  sama sekali** dari berkas CSV OHLCV lokal, dengan keluaran **deterministik**
-  (bisa meregenerasi/meninjau perubahan template tanpa candle live). Jalur
-  jaringan tetap menjadi **default**.
+  `--htf-file` / `--mtf-file` / `--ltf-file`) menjalankan tool **tanpa akses
+  jaringan sama sekali** dari berkas CSV OHLCV lokal, dengan keluaran
+  **deterministik** (bisa meregenerasi/meninjau perubahan template tanpa candle
+  live). Jalur jaringan tetap menjadi **default**.
 - **Guard ukuran prompt (Phase 5, #11)** — setelah render, ukuran prompt (byte
   UTF-8) diperiksa: melewati ambang lunak `PROMPT_BYTES_WARN` (default
   `120000`) memunculkan `WARN` berisi jumlah byte + perkiraan token; flag
@@ -139,11 +169,12 @@ Paket juga dapat dijalankan tanpa instalasi melalui `python -m smc_prompt`.
 Bentuk umum:
 
 ```
-smc-prompt <SYMBOL> [--htf-interval I] [--ltf-interval I]
-                     [--htf-candles N] [--ltf-candles N] [--swing-lookback N]
+smc-prompt <SYMBOL> [--htf-interval I] [--mtf-interval I] [--ltf-interval I]
+                     [--htf-candles N] [--mtf-candles N] [--ltf-candles N]
+                     [--swing-lookback N]
                      [--distance-reference {nearest,most-recent}] [--no-atr]
                      [--base-url URL] [--output-dir PATH] [--stdout]
-                     [--input-csv FILE] [--htf-file FILE] [--ltf-file FILE]
+                     [--input-csv FILE] [--htf-file FILE] [--mtf-file FILE] [--ltf-file FILE]
                      [--max-prompt-bytes BYTES] [--dry-run] [--debug]
 ```
 
@@ -170,8 +201,10 @@ dan [`smc_prompt/config.py`](smc_prompt/config.py).
 |---|---|---|---|
 | `SYMBOL` | positional `str` | — | Simbol Binance Spot, mis. `BTCUSDT`. Case-insensitive; dinormalisasi ke huruf besar. Wajib diisi. |
 | `--htf-interval` | interval Binance | `1d` | Interval kline Binance untuk seri HTF. Nilai valid: `1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M`. Nilai di luar daftar ditolak dengan exit code `2`. |
-| `--ltf-interval` | interval Binance | `1h` | Interval kline Binance untuk seri LTF. Daftar nilai valid sama dengan `--htf-interval`. |
+| `--mtf-interval` | interval Binance | `4h` | Interval kline Binance untuk seri MTF (medium). Daftar nilai valid sama dengan `--htf-interval`. Harus berbeda dari dua tier lainnya. |
+| `--ltf-interval` | interval Binance | `1h` | Interval kline Binance untuk seri LTF. Daftar nilai valid sama dengan `--htf-interval`. Harus berbeda dari dua tier lainnya. |
 | `--htf-candles` | `int >= 10` | `60` | Jumlah candle **HTF-interval tertutup** (closed) pada tabel mentah HTF. |
+| `--mtf-candles` | `int >= 10` | `120` | Jumlah candle **MTF-interval tertutup** (closed) pada tabel mentah MTF. |
 | `--ltf-candles` | `int >= 10` | `100` | Jumlah candle **LTF-interval tertutup** (closed) pada tabel mentah LTF. |
 | `--swing-lookback` | `int` ganjil `>= 3` | `5` | Ukuran window fractal `N` untuk deteksi swing. |
 | `--distance-reference` | pilihan: `nearest` \| `most-recent` | `nearest` | Referensi swing untuk perhitungan jarak. `nearest` = swing terdekat berdasarkan jarak harga absolut ke harga saat ini; `most-recent` = swing terbaru berdasarkan timestamp. |
@@ -179,8 +212,9 @@ dan [`smc_prompt/config.py`](smc_prompt/config.py).
 | `--base-url` | `str` (URL) | `None` | Override host REST Binance. Host ini di-`prepend` ke daftar host default, tetap dengan failover. |
 | `--output-dir` | `path` (folder) | `output` | Direktori untuk berkas prompt `.md` yang dihasilkan. |
 | `--stdout` | flag | off | Selain menulis berkas `.md`, cetak juga prompt ke stdout. |
-| `--input-csv` | `path` (file) | — | **Mode offline (Phase 4).** Baca candle OHLCV dari CSV lokal, bukan dari Binance. Memasok **kedua** timeframe kecuali di-override `--htf-file`/`--ltf-file`. Jalur jaringan tetap default; mode offline hanya aktif bila flag ini diberikan. Lihat bagian "Mode Offline (Data Lokal CSV)". |
+| `--input-csv` | `path` (file) | — | **Mode offline (Phase 4).** Baca candle OHLCV dari CSV lokal, bukan dari Binance. Memasok **ketiga** timeframe kecuali di-override `--htf-file`/`--mtf-file`/`--ltf-file`. Jalur jaringan tetap default; mode offline hanya aktif bila flag ini diberikan. Lihat bagian "Mode Offline (Data Lokal CSV)". |
 | `--htf-file` | `path` (file) | — | CSV candle HTF untuk mode offline. **Wajib** disertai `--input-csv`; hanya menimpa seri HTF. |
+| `--mtf-file` | `path` (file) | — | CSV candle MTF untuk mode offline. **Wajib** disertai `--input-csv`; hanya menimpa seri MTF. |
 | `--ltf-file` | `path` (file) | — | CSV candle LTF untuk mode offline. **Wajib** disertai `--input-csv`; hanya menimpa seri LTF. |
 | `--max-prompt-bytes` | `int` | — (nonaktif) | **Batas keras ukuran prompt (Phase 5).** Bila prompt hasil render melebihi jumlah byte ini, tool membatalkan dengan `ConfigError` (exit code `2`) **sebelum** menulis berkas. Nonaktif secara default. |
 | `--dry-run` | flag | off | **Dry run (Phase 5).** Validasi konfigurasi + simbol lalu cetak pengaturan yang diresolusi ke **stderr**, tanpa fetch klines, render, atau menulis berkas. |
@@ -552,30 +586,30 @@ Catatan:
   jadi **nama berkas output dan seluruh isi prompt adalah fungsi murni dari
   berkas input**.
 - Harga saat ini (current price) offline = **close candle LTF closed terakhir**.
-- Mode offline memerlukan `--htf-interval` dan `--ltf-interval` yang **berbeda**
-  (satu CSV memetakan tepat ke satu timeframe).
+- Mode offline memerlukan `--htf-interval`, `--mtf-interval`, dan `--ltf-interval`
+  yang **berbeda** (satu CSV memetakan tepat ke satu timeframe).
 
 ### Contoh
 
-Memakai satu berkas untuk kedua timeframe:
+Memakai satu berkas untuk **ketiga** timeframe:
 
 ```bash
-smc-prompt BTCUSDT --input-csv candles_1d.csv
+smc-prompt BTCUSDT --input-csv candles.csv
 ```
 
-Memakai berkas terpisah untuk HTF dan LTF:
+Memakai berkas terpisah untuk HTF, MTF, dan LTF:
 
 ```bash
 smc-prompt BTCUSDT --input-csv candles_1d.csv \
-  --htf-file candles_1d.csv --ltf-file candles_1h.csv
+  --htf-file candles_1d.csv --mtf-file candles_4h.csv --ltf-file candles_1h.csv
 ```
 
 Keluaran yang diharapkan: prompt lengkap tertulis ke
 `output/BTCUSDT_<stamp>.md` dengan nilai `GENERATED_AT_UTC` yang diturunkan dari
 CSV (deterministik), **tanpa** panggilan jaringan apa pun.
 
-`--htf-file` / `--ltf-file` **wajib** disertai `--input-csv`; memberikannya tanpa
-`--input-csv` akan gagal dengan exit code `2`.
+`--htf-file` / `--mtf-file` / `--ltf-file` **wajib** disertai `--input-csv`;
+memberikannya tanpa `--input-csv` akan gagal dengan exit code `2`.
 
 ---
 
@@ -789,14 +823,19 @@ Setelah render, ukuran prompt dihitung dalam **byte UTF-8**:
 - **`Offline CSV ...` (exit 2)** — berkas CSV tidak ditemukan, kolom wajib
   hilang, isi kosong, atau ada timestamp/angka yang tidak valid. Periksa header
   `open_time,open,high,low,close,volume` dan format nilainya (lihat "Mode Offline").
-- **`--htf-file / --ltf-file require --input-csv ...` (exit 2)** — flag berkas
-  per-timeframe butuh `--input-csv` agar mode offline aktif secara eksplisit.
+- **`--htf-file / --mtf-file / --ltf-file require --input-csv ...` (exit 2)** —
+  flag berkas per-timeframe butuh `--input-csv` agar mode offline aktif secara
+  eksplisit.
+- **`... must be three DISTINCT intervals ...` (exit 2)** — `--htf-interval`,
+  `--mtf-interval`, dan `--ltf-interval` tidak boleh sama; ketiganya harus
+  berbeda agar tiap tier memetakan ke seri sendiri.
 - **`Rendered prompt is <n> bytes, exceeding --max-prompt-bytes ...` (exit 2)** —
-  prompt melebihi batas keras. Turunkan `--htf-candles`/`--ltf-candles` atau
-  naikkan `--max-prompt-bytes`. Bila hanya peringatan lunak yang muncul (tanpa
+  prompt melebihi batas keras. Turunkan
+  `--htf-candles`/`--mtf-candles`/`--ltf-candles` atau naikkan
+  `--max-prompt-bytes`. Bila hanya peringatan lunak yang muncul (tanpa
   `--max-prompt-bytes`), prompt tetap ditulis (exit `0`).
 - **Argumen ditolak (exit 2)** — pastikan `--swing-lookback` ganjil `>= 3` dan
-  `--htf-candles`/`--ltf-candles` `>= 10`.
+  `--htf-candles`/`--mtf-candles`/`--ltf-candles` `>= 10`.
 - **Karakter non-ASCII pada Windows** — CLI memaksa stream stdout/stderr ke
   UTF-8 secara otomatis; tidak perlu konfigurasi manual.
 - **`Symbol <SYM> has exchange status '<status>' (not TRADING)` (peringatan)** —
@@ -842,6 +881,69 @@ Setelah render, ukuran prompt dihitung dalam **byte UTF-8**:
 - Semua timestamp adalah **UTC**.
 - Prompt tidak disanitasi terhadap prompt-injection, tetapi seluruh konten yang
   disuntikkan adalah data numerik/simbol yang dikendalikan oleh alat ini.
+
+## Roo Commander (Integrasi Alur Kerja Roo Code)
+
+Workspace ini dikembangkan dengan **Roo Commander v9.5.0**
+([jezweb/roo-commander](https://github.com/jezweb/roo-commander)) — orkestrator
+*skill-aware* yang menjembatani 60+ *skill* Claude Code ke Roo Code. Integrasi
+ini **tidak mengubah kode Python `smc-prompt`**; ia menambah lapisan perkakas
+Roo Code di atasnya.
+
+> **Instalasi bersifat GLOBAL** — Roo Commander tersedia di **semua proyek** VS
+> Code di mesin ini, bukan hanya di repositori ini.
+
+### Apa yang terpasang (global)
+
+- **CLI `roocommander`** (`npm install -g`) — tersedia di `PATH` di mana saja:
+  - `roocommander list` — tampilkan semua skill
+  - `roocommander search <keyword>` — cari skill
+  - `roocommander read "<skill>"` — muat konten skill
+  - `roocommander sync-index` — regenerasi indeks skill (juga memperbarui
+    indeks global `~/.roo/rules/01-skills-index.md`)
+- **Mode global** — terdaftar di
+  `%APPDATA%\Code\User\globalStorage\rooveterinaryinc.roo-cline\settings\custom_modes.yaml`
+  (dan `custom_modes.json`) sebagai slug `roo-commander` (👑), aktif di semua
+  proyek.
+- **Instruksi kustom global** di `~/.roo/`:
+  - `~/.roo/rules-roo-commander/` — aturan mode (identitas, orkestrasi, routing
+    skill, alur kerja)
+  - `~/.roo/rules/01-skills-index.md` — indeks 64 skill
+  - `~/.roo/rules/02-cli-usage.md` — referensi CLI
+  - `~/.roo/rules/03-skill-patterns.md` — panduan kapan memakai skill
+- **Skill** tersimpan di `~/.claude/skills/` (64 skill dari
+  [jezweb/claude-skills](https://github.com/jezweb/claude-skills)).
+
+### Cara pakai
+
+1. **Reload VS Code** (Command Palette → "Developer: Reload Window") agar mode
+   👑 Roo Commander muncul.
+2. Pindah mode: `/mode roo-commander`.
+3. Muat skill sebelum implementasi, mis.:
+   ```bash
+   roocommander search cloudflare
+   roocommander read "cloudflare-worker-builder"
+   ```
+
+### Catatan per-proyek
+
+Selain instalasi global, repositori ini juga memiliki salinan proyek-scoped
+di `.roo/` (indeks skill, aturan, dan `.roo/commands/` berisi 10 slash command
+seperti `/plan-project`, `/wrap-session`, `/load-skill`) beserta entri mode di
+`.roomodes`. Salinan ini bersifat opsional dan komplementer terhadap instalasi
+global.
+
+### Keterkaitan dengan `smc-prompt`
+
+Alur kerja Python proyek ini (Binance OHLC → fakta mekanis → prompt `.md`)
+berjalan independen. Roo Commander berguna saat mengembangkan proyek ini sendiri
+— mis. `react-patterns`, `vitest`, atau `cloudflare-worker-builder` bila kelak
+menambah antarmuka web/dashboard di atas `smc-prompt`.
+
+> **Catatan**: Jalankan `roocommander sync-index` setelah menambah/memperbarui
+> skill untuk menyegarkan indeks skill.
+
+---
 
 ## Lisensi
 

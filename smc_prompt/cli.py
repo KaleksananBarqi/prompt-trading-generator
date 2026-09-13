@@ -81,24 +81,30 @@ def _error(message: str) -> None:
 def _resolve_input_files(
     input_csv: str | None,
     htf_file: str | None,
+    mtf_file: str | None,
     ltf_file: str | None,
-) -> tuple[str | None, str | None]:
-    """Resolve the offline CSV file pair (or ``(None, None)`` for the network).
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve the offline CSV trio (or ``(None, None, None)`` for the network).
 
     Offline mode is enabled *only* by ``--input-csv`` so the default network path
-    is never switched implicitly. ``--htf-file`` / ``--ltf-file`` refine which CSV
-    feeds each timeframe; either may be omitted to fall back to ``--input-csv``.
+    is never switched implicitly. ``--htf-file`` / ``--mtf-file`` / ``--ltf-file``
+    refine which CSV feeds each timeframe; any may be omitted to fall back to
+    ``--input-csv``.
     """
 
     if input_csv:
-        return htf_file or input_csv, ltf_file or input_csv
-    if htf_file or ltf_file:
-        raise ConfigError(
-            "--htf-file / --ltf-file require --input-csv as well; offline mode "
-            "is enabled explicitly so the default network path is never changed "
-            "implicitly."
+        return (
+            htf_file or input_csv,
+            mtf_file or input_csv,
+            ltf_file or input_csv,
         )
-    return None, None
+    if htf_file or mtf_file or ltf_file:
+        raise ConfigError(
+            "--htf-file / --mtf-file / --ltf-file require --input-csv as well; "
+            "offline mode is enabled explicitly so the default network path is "
+            "never changed implicitly."
+        )
+    return None, None, None
 
 
 def _extract_tick_size(entry: dict) -> str | None:
@@ -124,6 +130,7 @@ def _print_resolved_settings(
     *,
     offline_mode: bool,
     htf_file: str | None,
+    mtf_file: str | None,
     ltf_file: str | None,
     print_stdout: bool,
     max_prompt_bytes: int | None,
@@ -137,20 +144,25 @@ def _print_resolved_settings(
 
     source = "offline CSV" if offline_mode else "Binance network"
     if offline_mode:
-        source = f"{source} (HTF={htf_file}, LTF={ltf_file})"
+        source = (
+            f"{source} (HTF={htf_file}, MTF={mtf_file}, LTF={ltf_file})"
+        )
     lines = [
         f"[{PROG}] DRY RUN — no file written, no klines fetched.",
         f"[{PROG}] symbol={config.symbol}",
         f"[{PROG}] data source={source}",
         f"[{PROG}] htf_interval={config.htf_interval} "
-        f"({config.htf_interval_label}) ltf_interval={config.ltf_interval} "
+        f"({config.htf_interval_label}) mtf_interval={config.mtf_interval} "
+        f"({config.mtf_interval_label}) ltf_interval={config.ltf_interval} "
         f"({config.ltf_interval_label})",
         f"[{PROG}] htf_candles={config.htf_candles} "
+        f"mtf_candles={config.mtf_candles} "
         f"ltf_candles={config.ltf_candles} "
         f"swing_lookback={config.swing_lookback}",
         f"[{PROG}] distance_reference={config.distance_reference} "
         f"include_atr={config.include_atr}",
         f"[{PROG}] htf_fetch_limit={config.htf_fetch_limit} "
+        f"mtf_fetch_limit={config.mtf_fetch_limit} "
         f"ltf_fetch_limit={config.ltf_fetch_limit}",
         f"[{PROG}] output_dir={config.output_dir} stdout={print_stdout}",
         f"[{PROG}] volume_mean_period={config.volume_mean_period} "
@@ -175,8 +187,8 @@ def _prompt_size_notes(text: str, config: cfg.Config) -> list[str]:
     if config.max_prompt_bytes is not None and size > config.max_prompt_bytes:
         raise ConfigError(
             f"Rendered prompt is {size} bytes, exceeding --max-prompt-bytes "
-            f"({config.max_prompt_bytes}). Reduce --htf-candles/--ltf-candles "
-            f"or raise the limit."
+            f"({config.max_prompt_bytes}). Reduce "
+            f"--htf-candles/--mtf-candles/--ltf-candles or raise the limit."
         )
 
     notes: list[str] = []
@@ -199,11 +211,14 @@ def run(
     include_atr: bool,
     output_dir: str,
     htf_interval: str = cfg.HTF_INTERVAL,
+    mtf_candles: int = cfg.DEFAULT_MTF_CANDLES,
+    mtf_interval: str = cfg.MTF_INTERVAL,
     ltf_interval: str = cfg.LTF_INTERVAL,
     print_stdout: bool = False,
     base_urls: tuple[str, ...] | None = None,
     input_csv: str | None = None,
     htf_file: str | None = None,
+    mtf_file: str | None = None,
     ltf_file: str | None = None,
     max_prompt_bytes: int | None = None,
     dry_run: bool = False,
@@ -213,19 +228,27 @@ def run(
     config = cfg.build_config(
         symbol,
         htf_candles=htf_candles,
+        mtf_candles=mtf_candles,
         ltf_candles=ltf_candles,
         swing_lookback=swing_lookback,
         distance_reference=distance_reference,
         include_atr=include_atr,
         htf_interval=htf_interval,
+        mtf_interval=mtf_interval,
         ltf_interval=ltf_interval,
         output_dir=output_dir,
         max_prompt_bytes=max_prompt_bytes,
         base_urls=base_urls,
     )
 
-    offline_htf, offline_ltf = _resolve_input_files(input_csv, htf_file, ltf_file)
-    offline_mode = offline_htf is not None and offline_ltf is not None
+    offline_htf, offline_mtf, offline_ltf = _resolve_input_files(
+        input_csv, htf_file, mtf_file, ltf_file
+    )
+    offline_mode = (
+        offline_htf is not None
+        and offline_mtf is not None
+        and offline_ltf is not None
+    )
 
     # --dry-run (Phase 5, #16): validate config + resolve the data source and
     # print the resolved settings, then exit WITHOUT fetching klines or writing
@@ -235,6 +258,7 @@ def run(
             config,
             offline_mode=offline_mode,
             htf_file=offline_htf,
+            mtf_file=offline_mtf,
             ltf_file=offline_ltf,
             print_stdout=print_stdout,
             max_prompt_bytes=max_prompt_bytes,
@@ -248,7 +272,10 @@ def run(
     fetcher: DataFetcher | LocalCsvSource
     if offline_mode:
         fetcher = LocalCsvSource(
-            config, htf_file=offline_htf, ltf_file=offline_ltf
+            config,
+            htf_file=offline_htf,
+            mtf_file=offline_mtf,
+            ltf_file=offline_ltf,
         )
     else:
         fetcher = DataFetcher(config)
@@ -289,11 +316,14 @@ def run(
         fetcher = fetcher.with_now(server_time)
 
     htf_raw = fetcher.fetch_klines(config.htf_interval, config.htf_fetch_limit)
+    mtf_raw = fetcher.fetch_klines(config.mtf_interval, config.mtf_fetch_limit)
     ltf_raw = fetcher.fetch_klines(config.ltf_interval, config.ltf_fetch_limit)
 
     # Current-price sanity (#13): cross-check the ticker against the last closed
     # LTF candle's [low, high] ± 1 × LTF ATR. The tolerance uses the same ATR
     # driving the swing filter, so no extra indicator is introduced.
+    # NOTE: the price-sanity band is intentionally LTF-only; MTF is excluded so
+    # the ticker cross-check and closed-candle fallback stay on the finest tier.
     ltf_closed = [candle for candle in ltf_raw if candle.is_closed]
     ltf_atr: Decimal | None = None
     if len(ltf_closed) >= config.atr_period + 1:
@@ -319,6 +349,13 @@ def run(
         current_price=current_price,
         config=config,
     )
+    mtf_result, mtf_table, mtf_stats = analyze(
+        mtf_raw,
+        timeframe=config.mtf_interval,
+        requested=config.mtf_candles,
+        current_price=current_price,
+        config=config,
+    )
     ltf_result, ltf_table, ltf_stats = analyze(
         ltf_raw,
         timeframe=config.ltf_interval,
@@ -333,6 +370,12 @@ def run(
             f"available (requested {htf_stats.requested_count}). "
             f"Reduced table to {htf_stats.emitted_count}."
         )
+    if mtf_stats.was_reduced:
+        warnings.append(
+            f"Only {mtf_stats.emitted_count} closed {config.mtf_interval} candles "
+            f"available (requested {mtf_stats.requested_count}). "
+            f"Reduced table to {mtf_stats.emitted_count}."
+        )
     if ltf_stats.was_reduced:
         warnings.append(
             f"Only {ltf_stats.emitted_count} closed {config.ltf_interval} candles "
@@ -340,7 +383,7 @@ def run(
             f"Reduced table to {ltf_stats.emitted_count}."
         )
 
-    for stats in (htf_stats, ltf_stats):
+    for stats in (htf_stats, mtf_stats, ltf_stats):
         if stats.zero_volume_streak >= config.delisted_zero_volume_streak:
             warnings.append(
                 DelistedWarning(
@@ -351,6 +394,7 @@ def run(
     # Mechanical reference/structure contradictions (deterministic; empty when
     # consistent). Non-fatal: the prompt is still rendered with the raw facts.
     warnings.extend(reference_sanity_warnings(htf_result, config))
+    warnings.extend(reference_sanity_warnings(mtf_result, config))
     warnings.extend(reference_sanity_warnings(ltf_result, config))
 
     for message in warnings:
@@ -361,8 +405,10 @@ def run(
         generated_at=generated_at,
         current_price=current_price,
         htf=htf_result,
+        mtf=mtf_result,
         ltf=ltf_result,
         htf_candles=htf_table,
+        mtf_candles=mtf_table,
         ltf_candles=ltf_table,
         config=config,
     )
@@ -416,6 +462,13 @@ def run(
     help="Number of CLOSED HTF-interval candles in the HTF raw table (>= 10).",
 )
 @click.option(
+    "--mtf-candles",
+    type=int,
+    default=cfg.DEFAULT_MTF_CANDLES,
+    show_default=True,
+    help="Number of CLOSED MTF-interval candles in the MTF raw table (>= 10).",
+)
+@click.option(
     "--ltf-candles",
     type=int,
     default=cfg.DEFAULT_LTF_CANDLES,
@@ -429,6 +482,16 @@ def run(
     show_default=True,
     help=(
         "Binance kline interval for the HTF series (e.g. 1d, 4h). "
+        "Allowed: " + ", ".join(cfg.BINANCE_INTERVALS) + "."
+    ),
+)
+@click.option(
+    "--mtf-interval",
+    type=str,
+    default=cfg.MTF_INTERVAL,
+    show_default=True,
+    help=(
+        "Binance kline interval for the MTF series (e.g. 4h, 2h). "
         "Allowed: " + ", ".join(cfg.BINANCE_INTERVALS) + "."
     ),
 )
@@ -494,8 +557,9 @@ def run(
     default=None,
     help=(
         "Run fully OFFLINE from a local OHLCV CSV (columns: "
-        "open_time,open,high,low,close,volume). Feeds BOTH timeframes unless "
-        "overridden by --htf-file/--ltf-file. Network is the default."
+        "open_time,open,high,low,close,volume). Feeds ALL THREE timeframes "
+        "unless overridden by --htf-file/--mtf-file/--ltf-file. Network is the "
+        "default."
     ),
 )
 @click.option(
@@ -504,6 +568,13 @@ def run(
     type=click.Path(dir_okay=False),
     default=None,
     help="Offline HTF candle CSV; requires --input-csv.",
+)
+@click.option(
+    "--mtf-file",
+    "mtf_file",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Offline MTF candle CSV; requires --input-csv.",
 )
 @click.option(
     "--ltf-file",
@@ -537,8 +608,10 @@ def run(
 def main(
     symbol: str,
     htf_candles: int,
+    mtf_candles: int,
     ltf_candles: int,
     htf_interval: str,
+    mtf_interval: str,
     ltf_interval: str,
     swing_lookback: int,
     distance_reference: str,
@@ -548,6 +621,7 @@ def main(
     print_stdout: bool,
     input_csv: str | None,
     htf_file: str | None,
+    mtf_file: str | None,
     ltf_file: str | None,
     max_prompt_bytes: int | None,
     dry_run: bool,
@@ -568,8 +642,10 @@ def main(
         run(
             symbol,
             htf_candles=htf_candles,
+            mtf_candles=mtf_candles,
             ltf_candles=ltf_candles,
             htf_interval=htf_interval,
+            mtf_interval=mtf_interval,
             ltf_interval=ltf_interval,
             swing_lookback=swing_lookback,
             distance_reference=distance_reference,
@@ -579,6 +655,7 @@ def main(
             base_urls=base_urls,
             input_csv=input_csv,
             htf_file=htf_file,
+            mtf_file=mtf_file,
             ltf_file=ltf_file,
             max_prompt_bytes=max_prompt_bytes,
             dry_run=dry_run,

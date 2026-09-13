@@ -38,6 +38,37 @@ Format kolom: tanggal,open,high,low,close,volume
 {{HTF_CANDLE_TABLE_CSV}}
 ```
 
+### Ringkasan Data MTF ({{MTF_INTERVAL_LABEL}})
+- Current price: {{CURRENT_PRICE}}
+- ATR ≈ {{ATR_PCT_OF_PRICE}} (ATR(14) HTF)
+- Klasifikasi struktur (mekanis): {{MTF_STRUCTURE_CLASS}}
+- Swing high terdeteksi: {{MTF_SWING_HIGH}} pada {{MTF_SWING_HIGH_DATE}} (jarak dari current: {{MTF_DIST_TO_HIGH}}, {{MTF_DIST_TO_HIGH_ATR}}×ATR(14))
+- Swing low terdeteksi: {{MTF_SWING_LOW}} pada {{MTF_SWING_LOW_DATE}} (jarak dari current: {{MTF_DIST_TO_LOW}}, {{MTF_DIST_TO_LOW_ATR}}×ATR(14))
+{% if INCLUDE_ATR %}
+- ATR(14): {{MTF_ATR14}} (opsional)
+{% endif %}
+- Equal Highs (liquidity pool): {{MTF_EQUAL_HIGHS}}
+- Equal Lows (liquidity pool): {{MTF_EQUAL_LOWS}}
+- Volume candle terakhir (relatif thd rata-rata N candle, spike bila ≥ ambang): {{MTF_VOLUME_RELATIVE}}, spike: {{MTF_VOLUME_SPIKE}}
+- Referensi HIGH terbaru (most-recent): {{MTF_REF_HIGH_RECENT}}
+- Referensi LOW terbaru (most-recent): {{MTF_REF_LOW_RECENT}}
+- Referensi HIGH terdekat (nearest): {{MTF_REF_HIGH_NEAREST}}
+- Referensi LOW terdekat (nearest): {{MTF_REF_LOW_NEAREST}}
+- Referensi HIGH ekstrem window: {{MTF_REF_HIGH_WINDOW_MAX}}
+- Referensi LOW ekstrem window: {{MTF_REF_LOW_WINDOW_MIN}}
+
+### Sequence Swing Terdeteksi MTF ({{MTF_INTERVAL_LABEL}}, oldest→newest)
+Label: HH=Higher High, HL=Higher Low, LH=Lower High, LL=Lower Low, EQH=Equal High, EQL=Equal Low, '-'=swing pertama tipe tsb. Kolom: datetime,tipe,level,label.
+```
+{{MTF_SWINGS_TABLE}}
+```
+
+### Data Candle Mentah MTF ({{MTF_INTERVAL_LABEL}}, {{MTF_CANDLE_COUNT}} candle terakhir, closed)
+Format kolom: datetime,open,high,low,close,volume
+```
+{{MTF_CANDLE_TABLE_CSV}}
+```
+
 ### Ringkasan Data LTF ({{LTF_INTERVAL_LABEL}})
 - Klasifikasi struktur (mekanis): {{LTF_STRUCTURE_CLASS}}
 - Swing high terdeteksi: {{LTF_SWING_HIGH}} pada {{LTF_SWING_HIGH_DATE}} (jarak dari current: {{LTF_DIST_TO_HIGH}}, {{LTF_DIST_TO_HIGH_ATR}}×ATR(14))
@@ -79,10 +110,11 @@ Hindari klaim absolut ("pasti", "dijamin", "akan"). Gunakan kalibrasi probabilit
 
 ---
 
-## 1. Multi-Timeframe Alignment (HTF & LTF)
+## 1. Multi-Timeframe Alignment (HTF, MTF & LTF)
 
 - **HTF Narrative:** Identifikasi tren makro dan _Draw on Liquidity_ (DOL) dari data HTF di atas. Ke arah mana target likuiditas besar berikutnya? [FAKTA + INFERENSI]
-- **LTF Context:** Evaluasi struktur LTF saat ini. Apakah selaras dengan narasi HTF, atau ini _inducement_? [INFERENSI]
+- **MTF Alignment:** Apakah struktur MTF mengonfirmasi atau bertentangan dengan narasi HTF? Apakah MTF adalah _dealing range_ tempat setup terbentuk? [FAKTA + INFERENSI]
+- **LTF Context:** Evaluasi struktur LTF saat ini. Apakah selaras dengan narasi HTF dan MTF, atau ini _inducement_? [INFERENSI]
 
 ## 2. Peta Jebakan Ritel (Retail Trap Mapping) — INI JANGKAR ANALISIS
 
@@ -106,6 +138,12 @@ Hindari klaim absolut ("pasti", "dijamin", "akan"). Gunakan kalibrasi probabilit
 [FAKTA] Fair Value Gap 3-candle murni mekanis: bullish bila low[i] > high[i-2] (range [high[i-2], low[i]]), bearish bila high[i] < low[i-2] (range [high[i], low[i-2]]); gap di bawah {{HTF_FVG_ATR_MULT}}×ATR disaring. Kolom: tanggal,tipe,lower,upper,status (filled bila candle setelahnya menembus penuh rentang).
 ```
 {{HTF_FVG_TABLE}}
+```
+
+### FVG Mekanis MTF ({{MTF_INTERVAL_LABEL}}, oldest→newest, terbaru maks. {{MTF_FVG_COUNT}})
+[FAKTA] Fair Value Gap 3-candle murni mekanis: bullish bila low[i] > high[i-2] (range [high[i-2], low[i]]), bearish bila high[i] < low[i-2] (range [high[i], low[i-2]]); gap di bawah {{MTF_FVG_ATR_MULT}}×ATR disaring. Kolom: datetime,tipe,lower,upper,status (filled bila candle setelahnya menembus penuh rentang).
+```
+{{MTF_FVG_TABLE}}
 ```
 
 ### FVG Mekanis LTF ({{LTF_INTERVAL_LABEL}}, oldest→newest, terbaru maks. {{LTF_FVG_COUNT}})

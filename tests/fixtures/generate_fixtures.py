@@ -1,9 +1,10 @@
 """Deterministic fixture generator for the offline CSV test suite.
 
-Run with ``python tests/fixtures/generate_fixtures.py`` to (re)create the two
+Run with ``python tests/fixtures/generate_fixtures.py`` to (re)create the three
 committed CSV fixtures:
 
     tests/fixtures/htf_daily.csv   (HTF, 1d, 80 rows)
+    tests/fixtures/mtf_4h.csv      (MTF, 4h, 120 rows)
     tests/fixtures/ltf_hourly.csv  (LTF, 1h, 150 rows)
 
 The generator is fully deterministic (a fixed ``random.Random`` seed plus a
@@ -87,6 +88,14 @@ def main() -> None:
         count=80,
         base=64000.0,
         seed=20260501,
+    )
+    generate(
+        FIXTURE_DIR / "mtf_4h.csv",
+        start=datetime(2026, 6, 30, tzinfo=timezone.utc),
+        step=timedelta(hours=4),
+        count=120,
+        base=66000.0,
+        seed=20260630,
     )
     generate(
         FIXTURE_DIR / "ltf_hourly.csv",
