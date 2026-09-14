@@ -258,7 +258,7 @@ def test_cli_offline_runs_from_csv(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    assert list(tmp_path.glob("BTCUSDT_*.md"))
+    assert list(tmp_path.glob("BTCUSDT-*.md"))
 
 
 def test_cli_offline_three_csv_mode(tmp_path: Path) -> None:
@@ -283,7 +283,7 @@ def test_cli_offline_three_csv_mode(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    written = list(tmp_path.glob("BTCUSDT_*.md"))
+    written = list(tmp_path.glob("BTCUSDT-*.md"))
     assert written
     text = written[0].read_text(encoding="utf-8")
     assert "Ringkasan Data HTF" in text

@@ -97,4 +97,4 @@ def test_offline_output_file_written(tmp_path: Path) -> None:
     assert written.is_file()
     assert written.read_text(encoding="utf-8") == result.prompt
     # Deterministic filename derived from max(close_time) + 1s.
-    assert written.name == "BTCUSDT_20260720T000001Z.md"
+    assert written.name == "BTCUSDT-2026-07-20-00-00-01-UTC.md"

@@ -108,8 +108,8 @@ DEFAULT_BASE_URLS: tuple[str, ...] = (
 # --------------------------------------------------------------------------
 
 DEFAULT_HTF_CANDLES: int = 60
-DEFAULT_MTF_CANDLES: int = 120
-DEFAULT_LTF_CANDLES: int = 100
+DEFAULT_MTF_CANDLES: int = 186
+DEFAULT_LTF_CANDLES: int = 168
 DEFAULT_SWING_LOOKBACK: int = 5
 DEFAULT_SWING_MERGE_ATR_MULT: Decimal = Decimal("0.5")
 DEFAULT_ATR_PERIOD: int = 14
@@ -367,6 +367,17 @@ def fmt_output_stamp(moment: datetime) -> str:
     """Output filename stamp: ``%Y%m%dT%H%M%SZ``."""
 
     return moment.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def fmt_output_stamp_hyphen(moment: datetime) -> str:
+    """UTC filename stamp: ``YYYY-MM-DD-HH-MM-SS-UTC`` (filesystem-safe).
+
+    Colons (illegal on Windows) and the ISO ``Z`` suffix are replaced by
+    hyphens and a literal ``UTC`` token, so the stem is safe on both Windows and
+    POSIX. The instant is always normalized to UTC before formatting.
+    """
+
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%d-%H-%M-%S-UTC")
 
 
 # --------------------------------------------------------------------------

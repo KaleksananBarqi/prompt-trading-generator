@@ -32,8 +32,8 @@ Label: HH=Higher High, HL=Higher Low, LH=Lower High, LL=Lower Low, EQH=Equal Hig
 {{HTF_SWINGS_TABLE}}
 ```
 
-### Data Candle Mentah HTF ({{HTF_INTERVAL_LABEL}}, {{HTF_CANDLE_COUNT}} candle terakhir, closed)
-Format kolom: tanggal,open,high,low,close,volume
+### Data Candle Mentah HTF ({{HTF_INTERVAL_LABEL}}, {{HTF_CANDLE_COUNT}} candle terakhir, closed, semua timestamp dalam UTC)
+Format kolom: tanggal(UTC),open,high,low,close,volume
 ```
 {{HTF_CANDLE_TABLE_CSV}}
 ```
@@ -63,8 +63,8 @@ Label: HH=Higher High, HL=Higher Low, LH=Lower High, LL=Lower Low, EQH=Equal Hig
 {{MTF_SWINGS_TABLE}}
 ```
 
-### Data Candle Mentah MTF ({{MTF_INTERVAL_LABEL}}, {{MTF_CANDLE_COUNT}} candle terakhir, closed)
-Format kolom: datetime,open,high,low,close,volume
+### Data Candle Mentah MTF ({{MTF_INTERVAL_LABEL}}, {{MTF_CANDLE_COUNT}} candle terakhir, closed, semua timestamp dalam UTC)
+Format kolom: datetime(UTC),open,high,low,close,volume
 ```
 {{MTF_CANDLE_TABLE_CSV}}
 ```
@@ -92,8 +92,8 @@ Label: HH=Higher High, HL=Higher Low, LH=Lower High, LL=Lower Low, EQH=Equal Hig
 {{LTF_SWINGS_TABLE}}
 ```
 
-### Data Candle Mentah LTF ({{LTF_INTERVAL_LABEL}}, {{LTF_CANDLE_COUNT}} candle terakhir, closed)
-Format kolom: datetime,open,high,low,close,volume
+### Data Candle Mentah LTF ({{LTF_INTERVAL_LABEL}}, {{LTF_CANDLE_COUNT}} candle terakhir, closed, semua timestamp dalam UTC)
+Format kolom: datetime(UTC),open,high,low,close,volume
 ```
 {{LTF_CANDLE_TABLE_CSV}}
 ```
@@ -154,13 +154,26 @@ Hindari klaim absolut ("pasti", "dijamin", "akan"). Gunakan kalibrasi probabilit
 
 ## 5. Trading Plan
 
+Isi tabel di bawah. Setiap baris bertanda "Alasan" WAJIB diberi justifikasi yang merujuk data di atas dan diberi label [FAKTA] / [INFERENSI] / [SPEKULASI] (aturan integritas pada bagian atas berlaku).
+
+**Definisi R:** `R = |Entry − Stop Loss|`. Untuk tiap target, `R multiple TPn = |TPn − Entry| / R`. Tunjukkan angka R yang eksplisit dan jelaskan **dasar** pemilihan angka R tersebut (mis. jarak ke pool likuiditas berikutnya, kelipatan ATR(14), atau struktur swing).
+
 | Parameter | Nilai |
 |---|---|
+| Model | [diisi oleh LLM, mis. gemini-pro-3.1] |
 | Bias | Bullish / Bearish |
 | Entry | [level + kondisi konfirmasi] |
+| Alasan Entry | [justifikasi berbasis data di atas + label [FAKTA]/[INFERENSI]/[SPEKULASI]] |
 | Stop Loss | [level spesifik] |
-| Take Profit | [level spesifik = pool dari poin 3] |
-| RRR aktual | [dihitung] |
+| Alasan SL | [justifikasi penempatan SL, mis. di luar swing/invalidasi struktur] |
+| TP1 | [level spesifik = pool dari poin 3] |
+| R multiple TP1 | [mis. 2.0R — jelaskan dasar angka R ini] |
+| Alasan TP1 | [pool likuiditas / FVG yang dituju] |
+| TP2 | [level spesifik = pool likuiditas berikutnya] |
+| R multiple TP2 | [mis. 3.5R — jelaskan dasar angka R ini] |
+| Alasan TP2 | [pool likuiditas / level berikutnya yang dituju] |
+| RRR aktual (TP1) | [dihitung dari R multiple TP1] |
+| RRR aktual (TP2) | [dihitung dari R multiple TP2] |
 
 **Aturan RRR:** Jika RRR < 1:2 → nyatakan eksplisit dan turunkan confidence. Jika tidak ada setup jelas → **"NO VALID SETUP — wait for clearer structure"** adalah jawaban sah.
 

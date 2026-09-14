@@ -1,7 +1,7 @@
 """Deliver the rendered prompt: write the Markdown file, then best-effort clipboard.
 
 The ``.md`` file is the primary artifact and is **always** written to
-``<output_dir>/<SYMBOL>_<YYYYMMDDTHHMMSSZ>.md``; failing to write it raises
+``<output_dir>/<SYMBOL>-<YYYY-MM-DD-HH-MM-SS-UTC>.md``; failing to write it raises
 :class:`OutputError` (exit 6). Copying to the clipboard happens afterwards and is
 best-effort: when ``pyperclip`` fails (e.g. a headless system without
 xclip/xsel) the failure is surfaced as a warning while the exit code stays 0.
@@ -40,10 +40,15 @@ class DeliveryResult:
 
 
 def make_output_path(symbol: str, output_dir: str, moment: datetime) -> Path:
-    """``<output_dir>/<SYMBOL>_<YYYYMMDDTHHMMSSZ>.md`` (spec §11)."""
+    """``<output_dir>/<SYMBOL>-<YYYY-MM-DD-HH-MM-SS-UTC>.md``.
 
-    stamp = cfg.fmt_output_stamp(moment)
-    return Path(output_dir) / f"{symbol.upper()}_{stamp}.md"
+    The stamp is always normalized to UTC and uses hyphen separators (no
+    colons), so the filename is filesystem-safe on Windows and POSIX. Example:
+    ``EURUSD-2026-09-14-06-06-32-UTC.md``.
+    """
+
+    stamp = cfg.fmt_output_stamp_hyphen(moment)
+    return Path(output_dir) / f"{symbol.upper()}-{stamp}.md"
 
 
 def copy_to_clipboard(text: str) -> None:

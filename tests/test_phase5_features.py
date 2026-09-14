@@ -214,7 +214,7 @@ def test_cli_max_prompt_bytes_offline_aborts(
 
     assert result.exit_code == 2
     assert "--max-prompt-bytes" in result.output
-    assert not list(tmp_path.glob("BTCUSDT_*.md"))
+    assert not list(tmp_path.glob("BTCUSDT-*.md"))
 
 
 # --------------------------------------------------------------------------
@@ -245,7 +245,7 @@ def test_dry_run_does_not_fetch_or_write(
     assert result.dry_run is True
     assert result.prompt == ""
     assert result.output_path == ""
-    assert not list(tmp_path.glob("BTCUSDT_*.md"))
+    assert not list(tmp_path.glob("BTCUSDT-*.md"))
 
 
 def test_dry_run_cli_exits_zero_and_prints_settings(tmp_path: Path) -> None:
@@ -258,7 +258,7 @@ def test_dry_run_cli_exits_zero_and_prints_settings(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "DRY RUN" in result.output
     assert "symbol=BTCUSDT" in result.output
-    assert not list(tmp_path.glob("BTCUSDT_*.md"))
+    assert not list(tmp_path.glob("BTCUSDT-*.md"))
 
 
 def test_dry_run_still_validates_symbol_argument() -> None:
@@ -444,7 +444,7 @@ def test_build_config_accepts_three_intervals() -> None:
 
     assert config.mtf_interval == "4h"
     assert config.mtf_interval_label == "4H"
-    assert config.mtf_candles == 120
+    assert config.mtf_candles == cfg.DEFAULT_MTF_CANDLES
 
 
 def test_build_config_rejects_duplicate_intervals() -> None:
@@ -554,3 +554,37 @@ def test_non_goal_strings_absent(tmp_path: Path) -> None:
     for line in prompt.split("\n"):
         if "Klasifikasi struktur (mekanis)" in line or "struktur (mekanis)" in line:
             assert "bias" not in line.lower()
+
+
+# --------------------------------------------------------------------------
+# Model label + reasoned Trade Plan (requirement 1)
+# --------------------------------------------------------------------------
+
+
+def test_trade_plan_model_row_is_blank_for_llm(tmp_path: Path) -> None:
+    prompt = _offline_prompt(tmp_path)
+
+    # The model row lives INSIDE section 5 and is left for the LLM to fill.
+    plan = prompt.split("## 5. Trading Plan", 1)[1]
+    assert "| Model | [diisi oleh LLM" in plan
+    # The tool injects no model label anywhere in the prompt.
+    assert "- **Model:**" not in prompt
+    assert "MODEL_NAME" not in prompt
+
+
+def test_trade_plan_requests_named_reasoning(tmp_path: Path) -> None:
+    prompt = _offline_prompt(tmp_path)
+
+    for marker in (
+        "Alasan Entry",
+        "Alasan SL",
+        "TP1",
+        "R multiple TP1",
+        "Alasan TP1",
+        "TP2",
+        "R multiple TP2",
+        "Alasan TP2",
+        "RRR aktual (TP1)",
+        "RRR aktual (TP2)",
+    ):
+        assert marker in prompt

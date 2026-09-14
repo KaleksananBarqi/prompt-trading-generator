@@ -80,7 +80,7 @@ tinggal menjalankan satu perintah lalu menempelkan hasilnya ke LLM mana pun.
   saat ini yang tidak wajar (non-positif atau di luar rentang
   `[low, high]` candle closed terakhir ± 1×ATR).
 - **Output berbasis berkas (default):** prompt **selalu** ditulis ke
-  `./output/<SYMBOL>_<timestamp>.md` lalu disalin ke clipboard (best-effort);
+  `./output/<SYMBOL>-<YYYY-MM-DD-HH-MM-SS-UTC>.md` lalu disalin ke clipboard (best-effort);
   `--stdout` menambahkan cetak ke stdout. Jika clipboard tidak tersedia
   (lingkungan headless), itu hanya peringatan (exit 0).
 - **Tiga timeframe native (3-tier)** — satu kali jalan mengambil, menganalisis,
@@ -247,8 +247,10 @@ konstanta `DEFAULT_BASE_URLS`.
 ### Format Output
 
 - Prompt yang dirender **selalu** ditulis ke
-  `output/<SYMBOL>_<YYYYMMDDTHHMMSSZ>.md`, mis.
-  `output/BTCUSDT_20260913T080934Z.md` — berkas ini adalah artefak utama.
+  `output/<SYMBOL>-<YYYY-MM-DD-HH-MM-SS-UTC>.md`, mis.
+  `output/BTCUSDT-2026-09-13-08-09-34-UTC.md` — berkas ini adalah artefak utama.
+  Stamp selalu dinormalisasi ke **UTC** dan memakai pemisah tanda hubung
+  (tanpa titik dua) sehingga aman di filesystem Windows maupun POSIX.
 - Setelah berkas tertulis, prompt disalin ke **clipboard** secara **best-effort**.
   Bila clipboard tidak tersedia (lingkungan headless), hanya peringatan yang
   dikirim ke stderr dan exit code tetap `0`.
@@ -286,7 +288,7 @@ smc-prompt BTCUSDT
 
 Keluaran yang diharapkan:
 
-- Prompt lengkap tertulis ke `output/BTCUSDT_<YYYYMMDDTHHMMSSZ>.md`.
+- Prompt lengkap tertulis ke `output/BTCUSDT-<YYYY-MM-DD-HH-MM-SS-UTC>.md`.
 - Pesan `[smc-prompt] Prompt written to output/<file>.md.` dan
   `[smc-prompt] Prompt copied to clipboard.` ke **stderr**.
 - stdout kosong (tanpa teks prompt) secara default.
@@ -417,7 +419,7 @@ smc-prompt BTCUSDT --output-dir ./hasil
 Keluaran yang diharapkan:
 
 - Berkas prompt selalu ditulis ke
-  `./hasil/BTCUSDT_<YYYYMMDDTHHMMSSZ>.md`.
+  `./hasil/BTCUSDT-<YYYY-MM-DD-HH-MM-SS-UTC>.md`.
 - Bila clipboard tersedia: prompt juga tersalin, pesan
   `[smc-prompt] Prompt copied to clipboard.` pada stderr.
 - Bila clipboard tidak tersedia (headless): hanya peringatan yang dikirim ke
@@ -605,8 +607,8 @@ smc-prompt BTCUSDT --input-csv candles_1d.csv \
 ```
 
 Keluaran yang diharapkan: prompt lengkap tertulis ke
-`output/BTCUSDT_<stamp>.md` dengan nilai `GENERATED_AT_UTC` yang diturunkan dari
-CSV (deterministik), **tanpa** panggilan jaringan apa pun.
+`output/BTCUSDT-<YYYY-MM-DD-HH-MM-SS-UTC>.md` dengan nilai `GENERATED_AT_UTC`
+yang diturunkan dari CSV (deterministik), **tanpa** panggilan jaringan apa pun.
 
 `--htf-file` / `--mtf-file` / `--ltf-file` **wajib** disertai `--input-csv`;
 memberikannya tanpa `--input-csv` akan gagal dengan exit code `2`.
